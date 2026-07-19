@@ -298,8 +298,8 @@ function Nav({ activeTab, setActiveTab }) {
           </button>
         ))}
       </div>
-      <div className="avatar">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <div className="avatar" onClick={() => setActiveTab("profile")} style={{ cursor: "pointer", background: activeTab === "profile" ? "#2563eb" : "#d1d5db" }}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={activeTab === "profile" ? "#fff" : "#6b7280"} strokeWidth="2">
           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
         </svg>
       </div>
@@ -316,6 +316,142 @@ function Footer({ step, onBack, onNext, nextLabel = "Next", disableNext = false 
       <button className="btn btn-primary" onClick={onNext} disabled={disableNext} style={{ opacity: disableNext ? 0.5 : 1 }}>
         {nextLabel}
       </button>
+    </div>
+  );
+}
+
+//Sign In
+function SignIn({ onSignIn, onGoSignUp }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const handle = () => {
+    if (!email || !password) { setError("Please fill in all fields"); return; }
+    onSignIn(email);
+  };
+
+  return (
+    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ width: 380, background: "#fff", borderRadius: 20, padding: 36, boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 4 }}>Welcome back</div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 28 }}>Sign in to your account</div>
+
+        {error && <div style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", padding: "8px 12px", borderRadius: 8, marginBottom: 16 }}>{error}</div>}
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Email</div>
+          <input
+            type="email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            placeholder="you@organisation.com"
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Password</div>
+          <input
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="••••••••"
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" }}
+          />
+        </div>
+
+        <button
+          onClick={handle}
+          style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", marginBottom: 16 }}>
+          Sign in
+        </button>
+
+        <div style={{ textAlign: "center", fontSize: 13, color: "#6b7280" }}>
+          Don't have an account?{" "}
+          <span onClick={onGoSignUp} style={{ color: "#2563eb", fontWeight: 600, cursor: "pointer" }}>Sign up</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+//Sign Up
+function SignUp({ onSignUp, onGoSignIn }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+
+  const handle = () => {
+    if (!name || !email || !password || !confirm) { setError("Please fill in all fields"); return; }
+    if (password !== confirm) { setError("Passwords do not match"); return; }
+    onSignUp(name, email);
+  };
+
+  return (
+    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ width: 380, background: "#fff", borderRadius: 20, padding: 36, boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 4 }}>Create an account</div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 28 }}>Get started with vulnerability management</div>
+
+        {error && <div style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", padding: "8px 12px", borderRadius: 8, marginBottom: 16 }}>{error}</div>}
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Full name</div>
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Your name"
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Email</div>
+          <input
+            type="email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            placeholder="you@organisation.com"
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Password</div>
+          <input
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="••••••••"
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Confirm password</div>
+          <input
+            type="password"
+            value={confirm}
+            onChange={e => setConfirm(e.target.value)}
+            placeholder="••••••••"
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" }}
+          />
+        </div>
+
+        <button
+          onClick={handle}
+          style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", marginBottom: 16 }}>
+          Create account
+        </button>
+
+        <div style={{ textAlign: "center", fontSize: 13, color: "#6b7280" }}>
+          Already have an account?{" "}
+          <span onClick={onGoSignIn} style={{ color: "#2563eb", fontWeight: 600, cursor: "pointer" }}>Sign in</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -599,23 +735,510 @@ function ValidationStep({ onNext, onBack, selected, onCveClick }) {
   );
 }
 
-//Upload step 5: Generate Ticket (placeholder)
-function GenerateTicketStep({ onNext, onBack }) {
+//Upload step 5: Generate Ticket
+function GenerateTicketStep({ onNext, onBack, selected }) {
+  const tickets = (selected || []).map(id => {
+    const d = cveDetails[id] || {};
+    const row = vulnRows.find(r => r.id === id) || {};
+    return {
+      id,
+      title: `[${row.severity || ""}] ${id} — ${d.title || ""}`,
+      description: d.why || "",
+      priority: row.severity === "Critical" ? "P1 - Critical" : row.severity === "High" ? "P2 - High" : "P3 - Medium",
+      asset: row.asset || "",
+      assignTo: row.severity === "Critical" ? "Security Team" : "IT Operations",
+    };
+  });
+
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [forms, setForms] = useState(tickets.map(t => ({ ...t })));
+
+  const update = (field, value) => {
+    setForms(prev => prev.map((f, i) => i === activeIdx ? { ...f, [field]: value } : f));
+  };
+
+  const form = forms[activeIdx] || {};
+
   return (
     <>
-      <div className="page-card" />
-      <Footer step={4} onBack={onBack} onNext={onNext} nextLabel="Next" />
+      <div className="page-card" style={{ flexDirection: "row", gap: 0, padding: 0, overflow: "hidden" }}>
+        {/* Left sidebar */}
+        <div style={{ width: 200, borderRight: "1px solid #f3f4f6", padding: "16px 0", flexShrink: 0, overflowY: "auto" }}>
+          <div style={{ padding: "0 16px 12px", fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Tickets to create</div>
+          {forms.map((t, i) => (
+            <div key={t.id} onClick={() => setActiveIdx(i)}
+              style={{ padding: "10px 16px", cursor: "pointer", background: activeIdx === i ? "#eff6ff" : "transparent",
+                borderLeft: activeIdx === i ? "3px solid #2563eb" : "3px solid transparent" }}>
+              <div style={{ fontSize: 12, fontFamily: "monospace", color: activeIdx === i ? "#2563eb" : "#374151", fontWeight: 600 }}>{t.id}</div>
+              <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{t.priority}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Right form */}
+        <div style={{ flex: 1, padding: 24, overflowY: "auto" }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 20 }}>Create Ticket</div>
+
+          {/* Title + Priority */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <div>
+              <input
+                value={form.title || ""}
+                onChange={e => update("title", e.target.value)}
+                placeholder="Title"
+                style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none" }}
+              />
+            </div>
+            <div>
+              <select
+                value={form.priority || ""}
+                onChange={e => update("priority", e.target.value)}
+                style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none" }}>
+                <option>P1 - Critical</option>
+                <option>P2 - High</option>
+                <option>P3 - Medium</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Description */}
+          <div style={{ marginBottom: 12 }}>
+            <textarea
+              value={form.description || ""}
+              onChange={e => update("description", e.target.value)}
+              placeholder="Description (From AI)"
+              rows={5}
+              style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none", resize: "vertical", lineHeight: 1.6 }}
+            />
+          </div>
+
+          {/* Assign To + Destination */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+            <div>
+              <select
+                value={form.assignTo || ""}
+                onChange={e => update("assignTo", e.target.value)}
+                style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none" }}>
+                <option>Security Team</option>
+                <option>IT Operations</option>
+                <option>Infrastructure</option>
+                <option>Platform Engineering</option>
+              </select>
+            </div>
+            <div>
+              <select
+                value={form.asset || ""}
+                onChange={e => update("asset", e.target.value)}
+                style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none" }}>
+                {vulnRows.map(r => <option key={r.asset}>{r.asset}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {/* Submit to Jira button */}
+          <button
+            onClick={onNext}
+            style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+            Submit to Jira
+          </button>
+        </div>
+      </div>
+      <Footer step={4} onBack={onBack} onNext={onNext} nextLabel="Review & Send" />
     </>
   );
 }
 
-//Upload step 6: Review & Send (placeholder)
-function ReviewSendStep({ onNext, onBack }) {
+//Upload step 6: Review & Send
+function ReviewSendStep({ onNext, onBack, selected }) {
+  const tickets = (selected || []).map(id => {
+    const d = cveDetails[id] || {};
+    const row = vulnRows.find(r => r.id === id) || {};
+    return {
+      id,
+      title: d.title || "",
+      severity: row.severity || "",
+      priority: row.severity === "Critical" ? "P1" : row.severity === "High" ? "P2" : "P3",
+      assignTo: row.severity === "Critical" ? "Security Team" : "IT Operations",
+      why: d.why || "",
+      fixes: d.fixes || [],
+      asset: row.asset || "",
+    };
+  });
+
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [statuses, setStatuses] = useState(tickets.map(() => "pending"));
+  const [editing, setEditing] = useState(false);
+  const [editedValues, setEditedValues] = useState({});
+  const ticket = tickets[activeIdx] || {};
+
+  const getEditedValue = (key, defaultVal) => editedValues[`${activeIdx}-${key}`] ?? defaultVal;
+  const setEditedValue = (key, val) => setEditedValues(prev => ({ ...prev, [`${activeIdx}-${key}`]: val }));
+
+  const setStatus = (s) => {
+    setStatuses(prev => prev.map((v, i) => i === activeIdx ? s : v));
+    setEditing(false);
+    if (activeIdx < tickets.length - 1) setActiveIdx(activeIdx + 1);
+    else onNext();
+  };
+
+  const vulnDetailsVal = getEditedValue("details", `${ticket.id} — ${ticket.title}\nAsset: ${ticket.asset} | Priority: ${ticket.priority} | Assign To: ${ticket.assignTo}`);
+  const recommendationsVal = getEditedValue("recs", ticket.fixes.map((f) => `— ${f}`).join("\n"));
+  const auditVal = getEditedValue("audit", `— AI generated summary created\n— Validated against NVD and MITRE\n— Awaiting human approval`);
+
   return (
     <>
-      <div className="page-card" />
+      <div className="page-card" style={{ flexDirection: "row", gap: 0, padding: 0, overflow: "hidden" }}>
+        {/* Left sidebar */}
+        <div style={{ width: 200, borderRight: "1px solid #f3f4f6", padding: "16px 0", flexShrink: 0, overflowY: "auto" }}>
+          <div style={{ padding: "0 16px 12px", fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Review tickets</div>
+          {tickets.map((t, i) => (
+            <div key={t.id} onClick={() => { setActiveIdx(i); setEditing(false); }}
+              style={{ padding: "10px 16px", cursor: "pointer", background: activeIdx === i ? "#eff6ff" : "transparent",
+                borderLeft: activeIdx === i ? "3px solid #2563eb" : "3px solid transparent" }}>
+              <div style={{ fontSize: 12, fontFamily: "monospace", color: activeIdx === i ? "#2563eb" : "#374151", fontWeight: 600 }}>{t.id}</div>
+              <div style={{ fontSize: 11, marginTop: 2,
+                color: statuses[i] === "approved" ? "#16a34a" : statuses[i] === "rejected" ? "#dc2626" : "#9ca3af" }}>
+                {statuses[i] === "approved" ? "✓ Approved" : statuses[i] === "rejected" ? "✗ Rejected" : "Pending review"}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Right content */}
+        <div style={{ flex: 1, padding: 24, overflowY: "auto" }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 4 }}>Review and submit ticket</div>
+          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>{ticket.id} — {ticket.title}</div>
+
+          {/* Vulnerability details */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Vulnerability details</div>
+            <textarea
+              readOnly={!editing}
+              rows={3}
+              value={vulnDetailsVal}
+              onChange={e => setEditedValue("details", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: editing ? "#fff" : "#f9fafb", resize: "none", outline: "none", lineHeight: 1.6 }}
+            />
+          </div>
+
+          {/* AI Recommendations */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>AI recommendations</div>
+            <textarea
+              readOnly={!editing}
+              rows={5}
+              value={recommendationsVal}
+              onChange={e => setEditedValue("recs", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: editing ? "#fff" : "#f9fafb", resize: "none", outline: "none", lineHeight: 1.6 }}
+            />
+          </div>
+
+          {/* Audit Trail */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Audit trail</div>
+            <textarea
+              readOnly={!editing}
+              rows={3}
+              value={auditVal}
+              onChange={e => setEditedValue("audit", e.target.value)}
+              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: editing ? "#fff" : "#f9fafb", resize: "none", outline: "none", lineHeight: 1.6 }}
+            />
+          </div>
+
+          {/* Three buttons */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+            <button
+              onClick={() => setEditing(e => !e)}
+              style={{ padding: "11px", borderRadius: 20, border: "none", background: editing ? "#16a34a" : "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+              {editing ? "Save Changes" : "Edit Ticket"}
+            </button>
+            <button
+              onClick={() => setStatus("rejected")}
+              style={{ padding: "11px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+              Reject Ticket
+            </button>
+            <button
+              onClick={() => setStatus("approved")}
+              style={{ padding: "11px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+              Approve Ticket
+            </button>
+          </div>
+        </div>
+      </div>
       <Footer step={5} onBack={onBack} onNext={onNext} nextLabel="Done" />
     </>
+  );
+}
+
+//Ticket List
+const ticketData = [
+  { id: "T-101", cve: "CVE-2024-3094", title: "XZ Utils backdoor in liblzma", priority: "P1", status: "Open", assigned: "Security Team", date: "21-05-2026", cvss: 9.8, confidence: 92, fixes: cveDetails["CVE-2024-3094"]?.fixes || [], why: cveDetails["CVE-2024-3094"]?.why || "" },
+  { id: "T-102", cve: "CVE-2026-33845", title: "OpenSSL heap overflow in X.509 parser", priority: "P2", status: "In Progress", assigned: "Infra", date: "13-05-2026", cvss: 9.6, confidence: 88, fixes: cveDetails["CVE-2026-33845"]?.fixes || [], why: cveDetails["CVE-2026-33845"]?.why || "" },
+  { id: "T-103", cve: "CVE-2026-44012", title: "Redis Lua sandbox escape", priority: "P1", status: "Open", assigned: "Security Team", date: "05-05-2026", cvss: 9.1, confidence: 95, fixes: cveDetails["CVE-2026-44012"]?.fixes || [], why: cveDetails["CVE-2026-44012"]?.why || "" },
+  { id: "T-104", cve: "CVE-2026-33846", title: "Kubernetes kubelet path traversal", priority: "P3", status: "Open", assigned: "Platform Eng", date: "27-04-2026", cvss: 8.2, confidence: 81, fixes: cveDetails["CVE-2026-33846"]?.fixes || [], why: cveDetails["CVE-2026-33846"]?.why || "" },
+  { id: "T-105", cve: "CVE-2026-12012", title: "nginx HTTP/3 use-after-free", priority: "P2", status: "Closed", assigned: "Security Team", date: "24-04-2026", cvss: 6.3, confidence: 77, fixes: cveDetails["CVE-2026-12012"]?.fixes || [], why: cveDetails["CVE-2026-12012"]?.why || "" },
+];
+
+function TicketList() {
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [priorityFilter, setPriorityFilter] = useState("All");
+  const [selectedTicket, setSelectedTicket] = useState(ticketData[0]);
+  const [tickets, setTickets] = useState(ticketData);
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState({});
+
+  const filtered = tickets.filter(t =>
+    (statusFilter === "All" || t.status === statusFilter) &&
+    (priorityFilter === "All" || t.priority === priorityFilter)
+  );
+
+  const priorityColor = p => p === "P1" ? { bg: "#fef2f2", color: "#dc2626" } : p === "P2" ? { bg: "#fff7ed", color: "#ea580c" } : { bg: "#f0fdf4", color: "#16a34a" };
+  const statusColor = s => s === "Open" ? { bg: "#eff6ff", color: "#2563eb" } : s === "In Progress" ? { bg: "#fef9c3", color: "#ca8a04" } : { bg: "#f0fdf4", color: "#16a34a" };
+
+  return (
+    <div className="page-card" style={{ flexDirection: "row", gap: 0, padding: 0, overflow: "hidden", flex: 1 }}>
+      {/* Left panel */}
+      <div style={{ flex: 1, borderRight: "1px solid #f3f4f6", display: "flex", flexDirection: "column", minWidth: 0 }}>
+        {/* Header */}
+        <div style={{ padding: "20px 24px 0" }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#111", marginBottom: 4 }}>Tickets</div>
+          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>AI-generated — human approved — synced with Jira</div>
+
+          {/* Filters */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+            {["All", "Open", "In Progress", "Closed"].map(s => (
+              <button key={s} onClick={() => setStatusFilter(s)}
+                style={{ padding: "5px 14px", borderRadius: 20, border: "1px solid #e5e7eb", fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "DM Sans, sans-serif",
+                  background: statusFilter === s ? "#2563eb" : "#fff", color: statusFilter === s ? "#fff" : "#374151" }}>
+                {s}
+              </button>
+            ))}
+            <div style={{ width: 1, background: "#e5e7eb", margin: "0 4px" }} />
+            {["All", "P1", "P2", "P3"].map(p => (
+              <button key={p} onClick={() => setPriorityFilter(p)}
+                style={{ padding: "5px 14px", borderRadius: 20, border: "1px solid #e5e7eb", fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "DM Sans, sans-serif",
+                  background: priorityFilter === p ? "#2563eb" : "#fff", color: priorityFilter === p ? "#fff" : "#374151" }}>
+                {p}
+              </button>
+            ))}
+          </div>
+
+          {/* Table header */}
+          <div style={{ display: "grid", gridTemplateColumns: "60px 120px 1fr 60px 80px 100px 90px", gap: 8, padding: "8px 0", borderBottom: "1px solid #e5e7eb" }}>
+            {["Ticket", "CVE", "Title", "Priority", "Status", "Assigned", "Date"].map(h => (
+              <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</div>
+            ))}
+          </div>
+        </div>
+
+        {/* Table rows */}
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          {filtered.map(t => {
+            const pc = priorityColor(t.priority);
+            const sc = statusColor(t.status);
+            return (
+              <div key={t.id} onClick={() => { setSelectedTicket(t); setEditing(false); }}
+                style={{ display: "grid", gridTemplateColumns: "60px 120px 1fr 60px 80px 100px 90px", gap: 8, padding: "12px 24px", borderBottom: "1px solid #f3f4f6", cursor: "pointer",
+                  background: selectedTicket?.id === t.id ? "#eff6ff" : "transparent", alignItems: "center" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>{t.id}</div>
+                <div style={{ fontSize: 11, fontFamily: "monospace", color: "#6b7280" }}>{t.cve}</div>
+                <div style={{ fontSize: 12, color: "#374151", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
+                <div><span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20, background: pc.bg, color: pc.color }}>{t.priority}</span></div>
+                <div><span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 20, background: sc.bg, color: sc.color }}>{t.status}</span></div>
+                <div style={{ fontSize: 12, color: "#6b7280" }}>{t.assigned}</div>
+                <div style={{ fontSize: 11, color: "#9ca3af" }}>{t.date}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Right detail panel */}
+      {selectedTicket && (
+        <div style={{ width: 320, padding: 20, overflowY: "auto", flexShrink: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#111", marginBottom: 4 }}>{selectedTicket.id} — {selectedTicket.cve}</div>
+          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 12 }}>{selectedTicket.title}</div>
+
+          {/* Badges */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: priorityColor(selectedTicket.priority).bg, color: priorityColor(selectedTicket.priority).color }}>{selectedTicket.priority}</span>
+            <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: statusColor(selectedTicket.status).bg, color: statusColor(selectedTicket.status).color }}>{selectedTicket.status}</span>
+            <span style={{ fontSize: 11, color: "#6b7280", padding: "3px 0" }}>CVSS {selectedTicket.cvss}</span>
+          </div>
+
+          {/* AI Analysis */}
+          <div style={{ background: "#f5f3ff", borderRadius: 10, padding: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#7c3aed", marginBottom: 6 }}>AI-Powered Analysis</div>
+            <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.5 }}>{selectedTicket.why}</div>
+          </div>
+
+          {/* Suggested Fix */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Suggested fix</div>
+            {selectedTicket.fixes.map((f, i) => (
+              <div key={i} style={{ fontSize: 12, color: "#6b7280", marginBottom: 4, display: "flex", gap: 6 }}>
+                <span style={{ color: "#374151", fontWeight: 600, flexShrink: 0 }}>{i + 1}.</span> {f}
+              </div>
+            ))}
+          </div>
+
+          {/* Validation */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Validation</div>
+            {["CVSS verified against NVD", "CVE record exists in MITRE", "Vendor advisory cross-referenced"].map(v => (
+              <div key={v} style={{ fontSize: 12, color: "#6b7280", marginBottom: 3, display: "flex", gap: 6, alignItems: "center" }}>
+                <span style={{ color: "#22c55e" }}>✓</span> {v}
+              </div>
+            ))}
+          </div>
+
+          {/* Confidence */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Confidence</div>
+              <div style={{ fontSize: 12, color: "#374151" }}>{selectedTicket.confidence}%</div>
+            </div>
+            <div style={{ height: 6, background: "#e5e7eb", borderRadius: 99 }}>
+              <div style={{ height: 6, background: "#2563eb", borderRadius: 99, width: `${selectedTicket.confidence}%` }} />
+            </div>
+          </div>
+
+          {/* Buttons */}
+          {!editing ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={() => { setEditing(true); setEditForm({ status: selectedTicket.status, assigned: selectedTicket.assigned }); }}
+                style={{ flex: 1, padding: "8px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
+                Edit
+              </button>
+              <button
+                onClick={() => setSelectedTicket(null)}
+                style={{ flex: 1, padding: "8px", borderRadius: 20, border: "none", background: "#f3f4f6", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
+                Close
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <select
+                value={editForm.status}
+                onChange={e => setEditForm(f => ({ ...f, status: e.target.value }))}
+                style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none" }}>
+                <option>Open</option>
+                <option>In Progress</option>
+                <option>Closed</option>
+              </select>
+              <select
+                value={editForm.assigned}
+                onChange={e => setEditForm(f => ({ ...f, assigned: e.target.value }))}
+                style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none" }}>
+                <option>Security Team</option>
+                <option>IT Operations</option>
+                <option>Infrastructure</option>
+                <option>Platform Engineering</option>
+              </select>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={() => {
+                    const updated = { ...selectedTicket, ...editForm };
+                    setTickets(prev => prev.map(t => t.id === updated.id ? updated : t));
+                    setSelectedTicket(updated);
+                    setEditing(false);
+                  }}
+                  style={{ flex: 1, padding: "8px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+                  Save
+                </button>
+                <button
+                  onClick={() => setEditing(false)}
+                  style={{ flex: 1, padding: "8px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+//Profile
+function Profile({ onSignOut, userName, userEmail }) {
+  const [notifications, setNotifications] = useState(true);
+  const [defaultAssign, setDefaultAssign] = useState("Security Team");
+
+  return (
+    <div className="page-card" style={{ maxWidth: 560, margin: "0 auto", width: "100%" }}>
+      <div style={{ fontSize: 18, fontWeight: 700, color: "#111", marginBottom: 4 }}>Profile</div>
+      <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 24 }}>Manage your account settings</div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 28, padding: 20, background: "#f9fafb", borderRadius: 12 }}>
+        <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 20, fontWeight: 700, flexShrink: 0 }}>
+          {userName ? userName[0].toUpperCase() : "U"}
+        </div>
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#111" }}>{userName || "User"}</div>
+          <div style={{ fontSize: 13, color: "#6b7280" }}>{userEmail || "user@organisation.com"}</div>
+          <div style={{ fontSize: 12, color: "#2563eb", fontWeight: 600, marginTop: 2 }}>Security Analyst</div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Account details</div>
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Full name</div>
+              <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>{userName || "User"}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Role</div>
+              <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>Security Analyst</div>
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Email</div>
+            <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>{userEmail || "user@organisation.com"}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Organisation</div>
+            <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>Queensland University of Technology</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Preferences</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Email notifications</div>
+            <div style={{ fontSize: 12, color: "#6b7280" }}>Get alerted for critical vulnerabilities</div>
+          </div>
+          <div
+            onClick={() => setNotifications(n => !n)}
+            style={{ width: 44, height: 24, borderRadius: 99, background: notifications ? "#2563eb" : "#e5e7eb", cursor: "pointer", position: "relative", transition: "background .2s", flexShrink: 0 }}>
+            <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: notifications ? 23 : 3, transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+          </div>
+        </div>
+        <div style={{ padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb" }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: "#374151", marginBottom: 8 }}>Default assign to</div>
+          <select
+            value={defaultAssign}
+            onChange={e => setDefaultAssign(e.target.value)}
+            style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none" }}>
+            <option>Security Team</option>
+            <option>IT Operations</option>
+            <option>Infrastructure</option>
+            <option>Platform Engineering</option>
+          </select>
+        </div>
+      </div>
+
+      <button
+        onClick={onSignOut}
+        style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#fef2f2", color: "#dc2626", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+        Sign out
+      </button>
+    </div>
   );
 }
 
@@ -688,6 +1311,10 @@ export default function App() {
   const [selected, setSelected] = useState(vulnRows.map(r => r.id));
   const [prevStep, setPrevStep] = useState(1);
   const [uploadedFile, setUploadedFile] = useState(null);
+  const [authScreen, setAuthScreen] = useState("signin");
+  const [authed, setAuthed] = useState(false);
+  const [userName, setUserName] = useState("");
+  const [userEmail, setUserEmail] = useState("");
 
   const goToTab = tab => { setActiveTab(tab); setUploadStep(0); setCveId(null); setUploadedFile(null); };
 
@@ -700,11 +1327,25 @@ export default function App() {
       case 1: return <AISummaryStep onNext={() => setUploadStep(2)} onBack={() => setUploadStep(0)} onCveClick={id => { setPrevStep(1); setCveId(id); }} />;
       case 2: return <SelectStep onNext={() => setUploadStep(3)} onBack={() => setUploadStep(1)} selected={selected} setSelected={setSelected} onCveClick={id => { setPrevStep(2); setCveId(id); }} />;
       case 3: return <ValidationStep onNext={() => setUploadStep(4)} onBack={() => setUploadStep(2)} selected={selected} onCveClick={id => { setPrevStep(3); setCveId(id); }} />;
-      case 4: return <GenerateTicketStep onNext={() => setUploadStep(5)} onBack={() => setUploadStep(3)} />;
-      case 5: return <ReviewSendStep onNext={() => goToTab("dashboard")} onBack={() => setUploadStep(4)} />;
+      case 4: return <GenerateTicketStep onNext={() => setUploadStep(5)} onBack={() => setUploadStep(3)} selected={selected} />;
+      case 5: return <ReviewSendStep onNext={() => goToTab("tickets")} onBack={() => setUploadStep(4)} selected={selected} />;
       default: return null;
     }
   };
+
+  if (!authed) {
+    return (
+      <>
+        <style>{css}</style>
+        <div className="shell">
+          {authScreen === "signin"
+            ? <SignIn onSignIn={(email) => { setUserEmail(email); setAuthed(true); }} onGoSignUp={() => setAuthScreen("signup")} />
+            : <SignUp onSignUp={(name, email) => { setUserName(name); setUserEmail(email); setAuthScreen("signin"); }} onGoSignIn={() => setAuthScreen("signin")} />
+          }
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -718,11 +1359,8 @@ export default function App() {
 
         {activeTab === "dashboard" && <Dashboard />}
         {activeTab === "upload-scan" && renderUploadContent()}
-        {activeTab === "tickets" && (
-          <div className="page-card" style={{ alignItems: "center", justifyContent: "center", color: "#9ca3af", fontSize: 15 }}>
-            Tickets page coming soon
-          </div>
-        )}
+        {activeTab === "tickets" && <TicketList />}
+        {activeTab === "profile" && <Profile onSignOut={() => { setAuthed(false); setAuthScreen("signin"); }} userName={userName} userEmail={userEmail} />}
 
         <div className="chat-bubble">💬</div>
       </div>
