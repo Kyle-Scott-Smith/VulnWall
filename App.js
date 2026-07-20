@@ -321,14 +321,16 @@ function Footer({ step, onBack, onNext, nextLabel = "Next", disableNext = false 
 }
 
 //Sign In
-function SignIn({ onSignIn, onGoSignUp }) {
+function SignIn({ onSignIn, onGoSignUp, accounts }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
 
   const handle = () => {
     if (!email || !password) { setError("Please fill in all fields"); return; }
-    onSignIn(email);
+    const valid = accounts && accounts.find(a => a.email === email && a.password === password);
+    if (!valid) { setError("Invalid email or password. Please sign up first."); return; }
+    onSignIn(email, password);
   };
 
   return (
@@ -387,7 +389,7 @@ function SignUp({ onSignUp, onGoSignIn }) {
   const handle = () => {
     if (!name || !email || !password || !confirm) { setError("Please fill in all fields"); return; }
     if (password !== confirm) { setError("Passwords do not match"); return; }
-    onSignUp(name, email);
+    onSignUp(name, email, password);
   };
 
   return (
@@ -752,6 +754,8 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
 
   const [activeIdx, setActiveIdx] = useState(0);
   const [forms, setForms] = useState(tickets.map(t => ({ ...t })));
+  const [submitted, setSubmitted] = useState(tickets.map(() => null));
+  const allDone = submitted.every(s => s !== null);
 
   const update = (field, value) => {
     setForms(prev => prev.map((f, i) => i === activeIdx ? { ...f, [field]: value } : f));
@@ -770,7 +774,9 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
               style={{ padding: "10px 16px", cursor: "pointer", background: activeIdx === i ? "#eff6ff" : "transparent",
                 borderLeft: activeIdx === i ? "3px solid #2563eb" : "3px solid transparent" }}>
               <div style={{ fontSize: 12, fontFamily: "monospace", color: activeIdx === i ? "#2563eb" : "#374151", fontWeight: 600 }}>{t.id}</div>
-              <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{t.priority}</div>
+              <div style={{ fontSize: 11, marginTop: 2, color: submitted[i] === "approved" ? "#16a34a" : submitted[i] === "rejected" ? "#dc2626" : "#9ca3af" }}>
+                {submitted[i] === "approved" ? "✓ Approved" : submitted[i] === "rejected" ? "✗ Rejected" : t.priority}
+              </div>
             </div>
           ))}
         </div>
@@ -835,135 +841,117 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
             </div>
           </div>
 
-          {/* Submit to Jira button */}
-          <button
-            onClick={onNext}
-            style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
-            Submit to Jira
-          </button>
+          {/* Approve / Reject buttons */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <button
+              onClick={() => {
+                setSubmitted(prev => prev.map((s, i) => i === activeIdx ? (s === "approved" ? null : "approved") : s));
+                if (submitted[activeIdx] !== "approved" && activeIdx < tickets.length - 1) setActiveIdx(activeIdx + 1);
+              }}
+              style={{ padding: "12px", borderRadius: 20, border: "none", background: submitted[activeIdx] === "approved" ? "#16a34a" : "#2563eb", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+              {submitted[activeIdx] === "approved" ? "✓ Approved" : "Approve"}
+            </button>
+            <button
+              onClick={() => {
+                setSubmitted(prev => prev.map((s, i) => i === activeIdx ? (s === "rejected" ? null : "rejected") : s));
+                if (submitted[activeIdx] !== "rejected" && activeIdx < tickets.length - 1) setActiveIdx(activeIdx + 1);
+              }}
+              style={{ padding: "12px", borderRadius: 20, border: "1px solid #e5e7eb", background: submitted[activeIdx] === "rejected" ? "#fef2f2" : "#fff", color: submitted[activeIdx] === "rejected" ? "#dc2626" : "#374151", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+              {submitted[activeIdx] === "rejected" ? "✗ Rejected" : "Reject"}
+            </button>
+          </div>
         </div>
       </div>
-      <Footer step={4} onBack={onBack} onNext={onNext} nextLabel="Review & Send" />
+      <Footer step={4} onBack={onBack} onNext={() => onNext(tickets.filter((_, i) => submitted[i] === "approved").map(t => t.id))} nextLabel="Review & Send" disableNext={!allDone} />
     </>
   );
 }
 
 //Upload step 6: Review & Send
-function ReviewSendStep({ onNext, onBack, selected }) {
-  const tickets = (selected || []).map(id => {
+function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit }) {
+  const tickets = (approvedTickets || []).map(id => {
     const d = cveDetails[id] || {};
     const row = vulnRows.find(r => r.id === id) || {};
     return {
       id,
       title: d.title || "",
-      severity: row.severity || "",
       priority: row.severity === "Critical" ? "P1" : row.severity === "High" ? "P2" : "P3",
       assignTo: row.severity === "Critical" ? "Security Team" : "IT Operations",
-      why: d.why || "",
-      fixes: d.fixes || [],
-      asset: row.asset || "",
+      severity: row.severity || "",
     };
   });
 
-  const [activeIdx, setActiveIdx] = useState(0);
-  const [statuses, setStatuses] = useState(tickets.map(() => "pending"));
-  const [editing, setEditing] = useState(false);
-  const [editedValues, setEditedValues] = useState({});
-  const ticket = tickets[activeIdx] || {};
+  const [sent, setSent] = useState(false);
+  const priorityColor = p => p === "P1" ? { bg: "#fef2f2", color: "#dc2626" } : p === "P2" ? { bg: "#fff7ed", color: "#ea580c" } : { bg: "#f0fdf4", color: "#16a34a" };
 
-  const getEditedValue = (key, defaultVal) => editedValues[`${activeIdx}-${key}`] ?? defaultVal;
-  const setEditedValue = (key, val) => setEditedValues(prev => ({ ...prev, [`${activeIdx}-${key}`]: val }));
-
-  const setStatus = (s) => {
-    setStatuses(prev => prev.map((v, i) => i === activeIdx ? s : v));
-    setEditing(false);
-    if (activeIdx < tickets.length - 1) setActiveIdx(activeIdx + 1);
-    else onNext();
-  };
-
-  const vulnDetailsVal = getEditedValue("details", `${ticket.id} — ${ticket.title}\nAsset: ${ticket.asset} | Priority: ${ticket.priority} | Assign To: ${ticket.assignTo}`);
-  const recommendationsVal = getEditedValue("recs", ticket.fixes.map((f) => `— ${f}`).join("\n"));
-  const auditVal = getEditedValue("audit", `— AI generated summary created\n— Validated against NVD and MITRE\n— Awaiting human approval`);
+  if (sent) {
+    return (
+      <>
+        <div className="page-card" style={{ alignItems: "center", justifyContent: "center", gap: 16, minHeight: 300 }}>
+          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#f0fdf4", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>✓</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#111" }}>Tickets sent to Jira</div>
+          <div style={{ fontSize: 13, color: "#6b7280" }}>{tickets.length} ticket{tickets.length !== 1 ? "s" : ""} successfully created</div>
+          <button onClick={onNext} className="btn btn-primary" style={{ marginTop: 8 }}>Go to Tickets</button>
+        </div>
+        <Footer step={5} onBack={onBack} onNext={onNext} nextLabel="Done" />
+      </>
+    );
+  }
 
   return (
     <>
-      <div className="page-card" style={{ flexDirection: "row", gap: 0, padding: 0, overflow: "hidden" }}>
-        {/* Left sidebar */}
-        <div style={{ width: 200, borderRight: "1px solid #f3f4f6", padding: "16px 0", flexShrink: 0, overflowY: "auto" }}>
-          <div style={{ padding: "0 16px 12px", fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Review tickets</div>
-          {tickets.map((t, i) => (
-            <div key={t.id} onClick={() => { setActiveIdx(i); setEditing(false); }}
-              style={{ padding: "10px 16px", cursor: "pointer", background: activeIdx === i ? "#eff6ff" : "transparent",
-                borderLeft: activeIdx === i ? "3px solid #2563eb" : "3px solid transparent" }}>
-              <div style={{ fontSize: 12, fontFamily: "monospace", color: activeIdx === i ? "#2563eb" : "#374151", fontWeight: 600 }}>{t.id}</div>
-              <div style={{ fontSize: 11, marginTop: 2,
-                color: statuses[i] === "approved" ? "#16a34a" : statuses[i] === "rejected" ? "#dc2626" : "#9ca3af" }}>
-                {statuses[i] === "approved" ? "✓ Approved" : statuses[i] === "rejected" ? "✗ Rejected" : "Pending review"}
+      <div className="page-card">
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 4 }}>Review & Send</div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>Confirm the following tickets will be sent to Jira</div>
+
+        <div style={{ border: "1px solid #f3f4f6", borderRadius: 10, overflow: "hidden", marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr 1fr", padding: "10px 16px", background: "#f9fafb", borderBottom: "1px solid #f3f4f6" }}>
+            {["CVE", "Title", "Priority", "Assign To"].map(h => (
+              <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>{h}</div>
+            ))}
+          </div>
+          {tickets.map((t, i) => {
+            const pc = priorityColor(t.priority);
+            return (
+              <div key={t.id} style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr 1fr", padding: "12px 16px", borderBottom: i < tickets.length - 1 ? "1px solid #f3f4f6" : "none", alignItems: "center" }}>
+                <div style={{ fontSize: 12, fontFamily: "monospace", color: "#374151", fontWeight: 600 }}>{t.id}</div>
+                <div style={{ fontSize: 13, color: "#374151" }}>{t.title}</div>
+                <div><span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: pc.bg, color: pc.color }}>{t.priority}</span></div>
+                <div style={{ fontSize: 13, color: "#6b7280" }}>{t.assignTo}</div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
-        {/* Right content */}
-        <div style={{ flex: 1, padding: 24, overflowY: "auto" }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 4 }}>Review and submit ticket</div>
-          <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>{ticket.id} — {ticket.title}</div>
-
-          {/* Vulnerability details */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Vulnerability details</div>
-            <textarea
-              readOnly={!editing}
-              rows={3}
-              value={vulnDetailsVal}
-              onChange={e => setEditedValue("details", e.target.value)}
-              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: editing ? "#fff" : "#f9fafb", resize: "none", outline: "none", lineHeight: 1.6 }}
-            />
+        {tickets.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "20px 0" }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: "#374151", marginBottom: 6 }}>No tickets to send</div>
+            <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 16 }}>All tickets were rejected. Go back to approve at least one.</div>
+            <button onClick={onBack} style={{ padding: "10px 24px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>Go back</button>
           </div>
-
-          {/* AI Recommendations */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>AI recommendations</div>
-            <textarea
-              readOnly={!editing}
-              rows={5}
-              value={recommendationsVal}
-              onChange={e => setEditedValue("recs", e.target.value)}
-              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: editing ? "#fff" : "#f9fafb", resize: "none", outline: "none", lineHeight: 1.6 }}
-            />
-          </div>
-
-          {/* Audit Trail */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Audit trail</div>
-            <textarea
-              readOnly={!editing}
-              rows={3}
-              value={auditVal}
-              onChange={e => setEditedValue("audit", e.target.value)}
-              style={{ width: "100%", padding: "12px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: editing ? "#fff" : "#f9fafb", resize: "none", outline: "none", lineHeight: 1.6 }}
-            />
-          </div>
-
-          {/* Three buttons */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-            <button
-              onClick={() => setEditing(e => !e)}
-              style={{ padding: "11px", borderRadius: 20, border: "none", background: editing ? "#16a34a" : "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
-              {editing ? "Save Changes" : "Edit Ticket"}
-            </button>
-            <button
-              onClick={() => setStatus("rejected")}
-              style={{ padding: "11px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
-              Reject Ticket
-            </button>
-            <button
-              onClick={() => setStatus("approved")}
-              style={{ padding: "11px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
-              Approve Ticket
-            </button>
-          </div>
-        </div>
+        ) : (
+          <button
+            onClick={() => {
+              const newTickets = tickets.map((t, i) => ({
+                id: `T-${String(106 + i).padStart(3, "0")}`,
+                cve: t.id,
+                title: t.title,
+                priority: t.priority,
+                status: "Open",
+                assigned: t.assignTo,
+                date: new Date().toLocaleDateString("en-GB").replace(/\//g, "-"),
+                cvss: cveDetails[t.id]?.cvss || 0,
+                confidence: cveDetails[t.id]?.confidence || 0,
+                fixes: cveDetails[t.id]?.fixes || [],
+                why: cveDetails[t.id]?.why || "",
+              }));
+              onSubmit(newTickets);
+              setSent(true);
+            }}
+            style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+            Send to Jira
+          </button>
+        )}
       </div>
       <Footer step={5} onBack={onBack} onNext={onNext} nextLabel="Done" />
     </>
@@ -979,11 +967,11 @@ const ticketData = [
   { id: "T-105", cve: "CVE-2026-12012", title: "nginx HTTP/3 use-after-free", priority: "P2", status: "Closed", assigned: "Security Team", date: "24-04-2026", cvss: 6.3, confidence: 77, fixes: cveDetails["CVE-2026-12012"]?.fixes || [], why: cveDetails["CVE-2026-12012"]?.why || "" },
 ];
 
-function TicketList() {
+function TicketList({ tickets: initialTickets }) {
   const [statusFilter, setStatusFilter] = useState("All");
   const [priorityFilter, setPriorityFilter] = useState("All");
-  const [selectedTicket, setSelectedTicket] = useState(ticketData[0]);
-  const [tickets, setTickets] = useState(ticketData);
+  const [tickets, setTickets] = useState(initialTickets || []);
+  const [selectedTicket, setSelectedTicket] = useState((initialTickets || [])[0] || null);
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({});
 
@@ -1033,23 +1021,30 @@ function TicketList() {
 
         {/* Table rows */}
         <div style={{ overflowY: "auto", flex: 1 }}>
-          {filtered.map(t => {
-            const pc = priorityColor(t.priority);
-            const sc = statusColor(t.status);
-            return (
-              <div key={t.id} onClick={() => { setSelectedTicket(t); setEditing(false); }}
-                style={{ display: "grid", gridTemplateColumns: "60px 120px 1fr 60px 80px 100px 90px", gap: 8, padding: "12px 24px", borderBottom: "1px solid #f3f4f6", cursor: "pointer",
-                  background: selectedTicket?.id === t.id ? "#eff6ff" : "transparent", alignItems: "center" }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>{t.id}</div>
-                <div style={{ fontSize: 11, fontFamily: "monospace", color: "#6b7280" }}>{t.cve}</div>
-                <div style={{ fontSize: 12, color: "#374151", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
-                <div><span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20, background: pc.bg, color: pc.color }}>{t.priority}</span></div>
-                <div><span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 20, background: sc.bg, color: sc.color }}>{t.status}</span></div>
-                <div style={{ fontSize: 12, color: "#6b7280" }}>{t.assigned}</div>
-                <div style={{ fontSize: 11, color: "#9ca3af" }}>{t.date}</div>
-              </div>
-            );
-          })}
+          {filtered.length === 0 ? (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#374151" }}>No tickets found</div>
+              <div style={{ fontSize: 13, color: "#9ca3af" }}>Tickets will appear here once a scan has been reviewed and submitted</div>
+            </div>
+          ) : (
+            filtered.map(t => {
+              const pc = priorityColor(t.priority);
+              const sc = statusColor(t.status);
+              return (
+                <div key={t.id} onClick={() => { setSelectedTicket(t); setEditing(false); }}
+                  style={{ display: "grid", gridTemplateColumns: "60px 120px 1fr 60px 80px 100px 90px", gap: 8, padding: "12px 24px", borderBottom: "1px solid #f3f4f6", cursor: "pointer",
+                    background: selectedTicket?.id === t.id ? "#eff6ff" : "transparent", alignItems: "center" }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>{t.id}</div>
+                  <div style={{ fontSize: 11, fontFamily: "monospace", color: "#6b7280" }}>{t.cve}</div>
+                  <div style={{ fontSize: 12, color: "#374151", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
+                  <div><span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20, background: pc.bg, color: pc.color }}>{t.priority}</span></div>
+                  <div><span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 20, background: sc.bg, color: sc.color }}>{t.status}</span></div>
+                  <div style={{ fontSize: 12, color: "#6b7280" }}>{t.assigned}</div>
+                  <div style={{ fontSize: 11, color: "#9ca3af" }}>{t.date}</div>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
 
@@ -1309,10 +1304,13 @@ export default function App() {
   const [uploadStep, setUploadStep] = useState(0);
   const [cveId, setCveId] = useState(null);
   const [selected, setSelected] = useState(vulnRows.map(r => r.id));
+  const [submittedTickets, setSubmittedTickets] = useState([]);
+  const [liveTickets, setLiveTickets] = useState([]);
   const [prevStep, setPrevStep] = useState(1);
   const [uploadedFile, setUploadedFile] = useState(null);
   const [authScreen, setAuthScreen] = useState("signin");
   const [authed, setAuthed] = useState(false);
+  const [accounts, setAccounts] = useState([]);
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
 
@@ -1327,8 +1325,8 @@ export default function App() {
       case 1: return <AISummaryStep onNext={() => setUploadStep(2)} onBack={() => setUploadStep(0)} onCveClick={id => { setPrevStep(1); setCveId(id); }} />;
       case 2: return <SelectStep onNext={() => setUploadStep(3)} onBack={() => setUploadStep(1)} selected={selected} setSelected={setSelected} onCveClick={id => { setPrevStep(2); setCveId(id); }} />;
       case 3: return <ValidationStep onNext={() => setUploadStep(4)} onBack={() => setUploadStep(2)} selected={selected} onCveClick={id => { setPrevStep(3); setCveId(id); }} />;
-      case 4: return <GenerateTicketStep onNext={() => setUploadStep(5)} onBack={() => setUploadStep(3)} selected={selected} />;
-      case 5: return <ReviewSendStep onNext={() => goToTab("tickets")} onBack={() => setUploadStep(4)} selected={selected} />;
+      case 4: return <GenerateTicketStep onNext={(approved) => { setSubmittedTickets(approved); setUploadStep(5); }} onBack={() => setUploadStep(3)} selected={selected} />;
+      case 5: return <ReviewSendStep onNext={() => goToTab("tickets")} onBack={() => setUploadStep(4)} selected={selected} approvedTickets={submittedTickets} onSubmit={(newTickets) => setLiveTickets(prev => [...prev, ...newTickets])} />;
       default: return null;
     }
   };
@@ -1339,8 +1337,8 @@ export default function App() {
         <style>{css}</style>
         <div className="shell">
           {authScreen === "signin"
-            ? <SignIn onSignIn={(email) => { setUserEmail(email); setAuthed(true); }} onGoSignUp={() => setAuthScreen("signup")} />
-            : <SignUp onSignUp={(name, email) => { setUserName(name); setUserEmail(email); setAuthScreen("signin"); }} onGoSignIn={() => setAuthScreen("signin")} />
+            ? <SignIn onSignIn={(email, password) => { const account = accounts.find(a => a.email === email && a.password === password); if (account) { setUserName(account.name); setUserEmail(email); setAuthed(true); } }} onGoSignUp={() => setAuthScreen("signup")} accounts={accounts} />
+            : <SignUp onSignUp={(name, email, password) => { setAccounts(prev => [...prev, { name, email, password }]); setUserName(name); setUserEmail(email); setAuthScreen("signin"); }} onGoSignIn={() => setAuthScreen("signin")} />
           }
         </div>
       </>
@@ -1359,8 +1357,8 @@ export default function App() {
 
         {activeTab === "dashboard" && <Dashboard />}
         {activeTab === "upload-scan" && renderUploadContent()}
-        {activeTab === "tickets" && <TicketList />}
-        {activeTab === "profile" && <Profile onSignOut={() => { setAuthed(false); setAuthScreen("signin"); }} userName={userName} userEmail={userEmail} />}
+        {activeTab === "tickets" && <TicketList tickets={liveTickets} />}
+        {activeTab === "profile" && <Profile onSignOut={() => { setAuthed(false); setAuthScreen("signin"); setUserName(""); setUserEmail(""); }} userName={userName} userEmail={userEmail} />}
 
         <div className="chat-bubble">💬</div>
       </div>
