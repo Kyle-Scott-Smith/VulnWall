@@ -1,0 +1,33 @@
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      # Mount the whole frontend folder so any edits (new components, new
+      # pages, new files anywhere under src/) show up immediately without
+      # a rebuild. This is the key to keeping the environment generic.
+      - ./frontend:/app
+      # But keep node_modules INSIDE the container's own filesystem, not
+      # overwritten by your host folder (which likely has none, or a
+      # different OS's binaries). This anonymous volume "wins" over the
+      # bind mount above for that one subfolder.
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    stdin_open: true
+    tty: true
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    volumes:
+      # Same live-editing trick as the frontend: bind-mount the backend
+      # folder so editing scanner.py (or adding new .py files) is picked
+      # up by Flask's debug-mode reloader without a rebuild.
+      - ./backend:/app
+    environment:
+      - FLASK_DEBUG=1
