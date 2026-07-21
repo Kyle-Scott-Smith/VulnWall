@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
+// Base URL for the scanner-upload backend (Flask). Update this if the
+// backend runs somewhere other than localhost:5000 (e.g. in docker-compose).
+const API_BASE = "http://localhost:5000";
+
 //Placeholder for dashboard
 const vulnData = [
   { month: "Jan", count: 16 }, { month: "Feb", count: 13 },
@@ -14,7 +18,11 @@ const activityItems = [
 ];
 
 //Placeholder cve details
-const cveDetails = {
+// NOTE: allRisks / vulnRows / validationRows / cveDetails below start out as
+// demo data so the wizard still looks right before anything is uploaded.
+// Once a real scan file is uploaded, applyScanResults() overwrites their
+// contents with the parsed findings from the scanner-upload backend.
+let cveDetails = {
   "CVE-2024-3094": {
     cvss: 9.8, confidence: 92, severity: "Critical",
     title: "XZ Utils backdoor (liblzma)",
@@ -43,21 +51,76 @@ const cveDetails = {
 };
 
 //placeholder vulnerabilities
-const allRisks = Object.entries(cveDetails).map(([id, d]) => ({ id, cvss: d.cvss, severity: d.severity, title: d.title }));
-const vulnRows = [
+let allRisks = Object.entries(cveDetails).map(([id, d]) => ({ id, cvss: d.cvss, severity: d.severity, title: d.title }));
+let vulnRows = [
   { id: "CVE-2024-3094",  title: "",                                  severity: "Critical", cvss: 9.8, asset: "db-analytics-02"  },
   { id: "CVE-2026-33845", title: "OpenSSL heap overflow in X.509 parser", severity: "Critical", cvss: 9.6, asset: "edge-gw-prod-01"  },
   { id: "CVE-2026-44012", title: "Redis Lua sandbox escape",           severity: "Critical", cvss: 9.1, asset: "cache-shard-7"    },
   { id: "CVE-2026-33846", title: "Kubernetes kubelet path traversal",  severity: "High",     cvss: 8.2, asset: "k8s-cluster-eu"  },
   { id: "CVE-2026-12012", title: "nginx HTTP/3 use-after-free",        severity: "Medium",   cvss: 6.3, asset: "edge-gw-prod-02" },
 ];
-const validationRows = [
+let validationRows = [
   { id: "CVE-2024-3094",  severity: "Critical", status: "Validated",    desc: "OpenSSL heap overflow in X.509 parser"  },
   { id: "CVE-2026-33845", severity: "Critical", status: "Needs Review", desc: "Kubernetes kubelet path traversal"      },
   { id: "CVE-2026-44012", severity: "Critical", status: "Validated",    desc: "Redis Lua sandbox escape"               },
   { id: "CVE-2026-33846", severity: "High",     status: "Validated",    desc: "Kubernetes kubelet path traversal"      },
   { id: "CVE-2026-12012", severity: "Medium",   status: "Needs Review", desc: "nginx HTTP/3 use-after-free"            },
 ];
+
+// Turns the parsed vulnerability list returned by the scanner-upload backend
+// into the same shapes the wizard's UI already renders (vulnRows, cveDetails,
+// allRisks, validationRows), replacing the demo placeholder data above.
+function applyScanResults(vulnerabilities) {
+  const list = Array.isArray(vulnerabilities) ? vulnerabilities : [];
+
+  vulnRows = list.map(v => ({
+    id: v.cve || v.title,
+    title: v.title || v.cve || "Untitled finding",
+    severity: v.severity || "Unknown",
+    cvss: typeof v.cvss === "number" ? v.cvss : 0,
+    asset: v.asset || v.package || "unknown",
+  }));
+
+  cveDetails = Object.fromEntries(list.map(v => {
+    const id = v.cve || v.title;
+    // No AI-analysis service is wired up yet, so "confidence" and "fixes"
+    // are reasonable stand-ins derived from the raw scan data rather than
+    // real AI output — swap these out once the AI teammate's endpoint exists.
+    const fixes = [];
+    if (v.package && v.installedVersion) {
+      fixes.push(`Upgrade ${v.package} beyond the installed version (${v.installedVersion})`);
+    } else if (v.package) {
+      fixes.push(`Upgrade ${v.package} to a patched version`);
+    }
+    fixes.push(`Review the vendor advisory for ${id}`);
+    fixes.push("Re-scan the asset after remediation to confirm the fix");
+
+    return [id, {
+      cvss: typeof v.cvss === "number" ? v.cvss : 0,
+      confidence: typeof v.cvss === "number" && v.description ? 95 : 65,
+      severity: v.severity || "Unknown",
+      title: v.title || id,
+      why: v.description || "No description was provided by the scanner for this finding.",
+      fixes,
+    }];
+  }));
+
+  allRisks = Object.entries(cveDetails).map(([id, d]) => ({ id, cvss: d.cvss, severity: d.severity, title: d.title }));
+
+  // No real cross-checking service exists yet either; flag anything missing
+  // a CVSS score or description as needing a human look, and treat complete
+  // records as validated. Replace with real validation results later.
+  validationRows = list.map(v => {
+    const id = v.cve || v.title;
+    const complete = typeof v.cvss === "number" && !!v.description;
+    return {
+      id,
+      severity: v.severity || "Unknown",
+      status: complete ? "Validated" : "Needs Review",
+      desc: v.title || v.description || "",
+    };
+  });
+}
 
 //styling
 const css = `
@@ -459,10 +522,42 @@ function SignUp({ onSignUp, onGoSignIn }) {
 }
 
 //Upload step 1: Upload Scan
-function UploadStep({ onNext, onBack, file, setFile }) {
+function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
   const [over, setOver] = useState(false);
+  // status: idle | uploading | success | error
+  const [status, setStatus] = useState("idle");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [foundCount, setFoundCount] = useState(0);
 
-  const handleFile = f => { if (f) setFile(f); };
+  const uploadToServer = async f => {
+    setStatus("uploading");
+    setErrorMsg("");
+    try {
+      const formData = new FormData();
+      formData.append("file", f);
+      const res = await fetch(`${API_BASE}/api/upload-scan`, { method: "POST", body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Upload failed");
+      onParsed(data.vulnerabilities || []);
+      setFoundCount(data.vulnerabilitiesFound ?? (data.vulnerabilities || []).length);
+      setStatus("success");
+    } catch (err) {
+      setStatus("error");
+      setErrorMsg(err.message || "Could not reach the scanner service. Is the backend running?");
+    }
+  };
+
+  const handleFile = f => {
+    if (!f) return;
+    setFile(f);
+    uploadToServer(f);
+  };
+
+  const clearFile = () => {
+    setFile(null);
+    setStatus("idle");
+    setErrorMsg("");
+  };
 
   return (
     <>
@@ -482,25 +577,48 @@ function UploadStep({ onNext, onBack, file, setFile }) {
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
               <div className="dropzone-main">Drag and drop your scan or click to browse files</div>
-              <div className="dropzone-sub">Supports .json</div>
+              <div className="dropzone-sub">Supports .json (Trivy)</div>
             </div>
           ) : (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
               <div className="uploaded-file">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12"/>
-                </svg>
+                {status === "error" ? (
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                ) : (
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12"/>
+                  </svg>
+                )}
                 <div>
                   <div className="uploaded-name">{file.name}</div>
                   <div className="uploaded-size">{(file.size / 1024).toFixed(1)} KB</div>
                 </div>
-                <button style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 18 }} onClick={() => setFile(null)}>×</button>
+                <button style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 18 }} onClick={clearFile}>×</button>
               </div>
+              {status === "uploading" && (
+                <div className="dropzone-sub">Parsing scan file…</div>
+              )}
+              {status === "success" && (
+                <div className="dropzone-sub" style={{ color: "#16a34a" }}>{foundCount} vulnerabilit{foundCount === 1 ? "y" : "ies"} found.</div>
+              )}
+              {status === "error" && (
+                <div style={{ fontSize: 12, color: "#dc2626", display: "flex", alignItems: "center", gap: 10 }}>
+                  <span>{errorMsg}</span>
+                  <button
+                    onClick={() => uploadToServer(file)}
+                    style={{ background: "none", border: "none", color: "#2563eb", fontWeight: 600, cursor: "pointer", fontSize: 12 }}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
       </div>
-      <Footer step={0} onBack={onBack} onNext={onNext} disableNext={!file} />
+      <Footer step={0} onBack={onBack} onNext={onNext} disableNext={!file || status !== "success"} />
     </>
   );
 }
@@ -1316,12 +1434,17 @@ export default function App() {
 
   const goToTab = tab => { setActiveTab(tab); setUploadStep(0); setCveId(null); setUploadedFile(null); };
 
+  const handleScanParsed = vulnerabilities => {
+    applyScanResults(vulnerabilities);
+    setSelected(vulnRows.map(r => r.id));
+  };
+
   const renderUploadContent = () => {
     if (cveId) {
       return <CveDetailStep cveId={cveId} onBack={() => setCveId(null)} onNext={() => { setCveId(null); }} backLabel={prevStep === 2 ? "Back to Select" : "Back to AI Summary"} />;
     }
     switch (uploadStep) {
-      case 0: return <UploadStep onNext={() => setUploadStep(1)} onBack={() => goToTab("dashboard")} file={uploadedFile} setFile={setUploadedFile} />;
+      case 0: return <UploadStep onNext={() => setUploadStep(1)} onBack={() => goToTab("dashboard")} file={uploadedFile} setFile={setUploadedFile} onParsed={handleScanParsed} />;
       case 1: return <AISummaryStep onNext={() => setUploadStep(2)} onBack={() => setUploadStep(0)} onCveClick={id => { setPrevStep(1); setCveId(id); }} />;
       case 2: return <SelectStep onNext={() => setUploadStep(3)} onBack={() => setUploadStep(1)} selected={selected} setSelected={setSelected} onCveClick={id => { setPrevStep(2); setCveId(id); }} />;
       case 3: return <ValidationStep onNext={() => setUploadStep(4)} onBack={() => setUploadStep(2)} selected={selected} onCveClick={id => { setPrevStep(3); setCveId(id); }} />;
