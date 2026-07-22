@@ -523,6 +523,7 @@ function SignUp({ onSignUp, onGoSignIn }) {
 
 //Upload step 1: Upload Scan
 function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
+  const [mode, setMode] = useState("upload"); // "upload" | "live"
   const [over, setOver] = useState(false);
   // status: idle | uploading | success | error
   const [status, setStatus] = useState("idle");
@@ -559,66 +560,233 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
     setErrorMsg("");
   };
 
+  // --- Live scan (trigger Trivy/Tenable/etc. directly, no file needed) ---
+  const [scanners, setScanners] = useState(null); // null while loading, then { trivy: {...}, tenable: {...} }
+  const [scannerName, setScannerName] = useState("trivy");
+  const [target, setTarget] = useState("");
+  const [trivyScanType, setTrivyScanType] = useState("image");
+  const [trivyRunMode, setTrivyRunMode] = useState("local");
+  // liveStatus: idle | scanning | success | error
+  const [liveStatus, setLiveStatus] = useState("idle");
+  const [liveError, setLiveError] = useState("");
+  const [liveFoundCount, setLiveFoundCount] = useState(0);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/scanners`)
+      .then(res => res.json())
+      .then(data => {
+        setScanners(data);
+        const liveCapable = Object.keys(data).find(name => data[name].supportsLiveScan);
+        if (liveCapable) setScannerName(liveCapable);
+      })
+      .catch(() => setScanners({}));
+  }, []);
+
+  const runLiveScan = async () => {
+    if (!target.trim()) return;
+    setLiveStatus("scanning");
+    setLiveError("");
+    try {
+      const body = { scanner: scannerName, target: target.trim() };
+      if (scannerName === "trivy") {
+        body.scan_type = trivyScanType;
+        body.mode = trivyRunMode;
+      }
+      const res = await fetch(`${API_BASE}/api/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Scan failed");
+      onParsed(data.vulnerabilities || []);
+      setLiveFoundCount(data.vulnerabilitiesFound ?? (data.vulnerabilities || []).length);
+      setLiveStatus("success");
+    } catch (err) {
+      setLiveStatus("error");
+      setLiveError(err.message || "Could not reach the scanner service. Is the backend running?");
+    }
+  };
+
+  const switchMode = next => {
+    setMode(next);
+    // Reset whichever path isn't active so switching back and forth doesn't
+    // carry over a stale success/error state.
+    if (next === "upload") { setLiveStatus("idle"); setLiveError(""); }
+    else { clearFile(); }
+  };
+
+  const tabStyle = active => ({
+    padding: "6px 14px",
+    borderRadius: 20,
+    border: "1px solid " + (active ? "#2563eb" : "#e5e7eb"),
+    background: active ? "#2563eb" : "#fff",
+    color: active ? "#fff" : "#374151",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+  });
+
+  const inputStyle = { padding: "8px 10px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, width: "100%" };
+  const labelStyle = { fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4, display: "block" };
+
   return (
     <>
       <div className="page-card">
         <div className="page-title">Upload Scan</div>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-          {!file ? (
-            <div
-              className={`dropzone ${over ? "over" : ""}`}
-              onDragOver={e => { e.preventDefault(); setOver(true); }}
-              onDragLeave={() => setOver(false)}
-              onDrop={e => { e.preventDefault(); setOver(false); handleFile(e.dataTransfer.files[0]); }}
-              onClick={() => document.getElementById("file-input").click()}
-            >
-              <input id="file-input" type="file" accept=".json" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
-              <svg className="dropzone-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-              </svg>
-              <div className="dropzone-main">Drag and drop your scan or click to browse files</div>
-              <div className="dropzone-sub">Supports .json (Trivy)</div>
-            </div>
-          ) : (
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-              <div className="uploaded-file">
-                {status === "error" ? (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                  </svg>
-                ) : (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                )}
-                <div>
-                  <div className="uploaded-name">{file.name}</div>
-                  <div className="uploaded-size">{(file.size / 1024).toFixed(1)} KB</div>
-                </div>
-                <button style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 18 }} onClick={clearFile}>×</button>
-              </div>
-              {status === "uploading" && (
-                <div className="dropzone-sub">Parsing scan file…</div>
-              )}
-              {status === "success" && (
-                <div className="dropzone-sub" style={{ color: "#16a34a" }}>{foundCount} vulnerabilit{foundCount === 1 ? "y" : "ies"} found.</div>
-              )}
-              {status === "error" && (
-                <div style={{ fontSize: 12, color: "#dc2626", display: "flex", alignItems: "center", gap: 10 }}>
-                  <span>{errorMsg}</span>
-                  <button
-                    onClick={() => uploadToServer(file)}
-                    style={{ background: "none", border: "none", color: "#2563eb", fontWeight: 600, cursor: "pointer", fontSize: 12 }}
-                  >
-                    Retry
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <button style={tabStyle(mode === "upload")} onClick={() => switchMode("upload")}>Upload a report</button>
+          <button style={tabStyle(mode === "live")} onClick={() => switchMode("live")}>Run a live scan</button>
         </div>
+
+        {mode === "upload" ? (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+            {!file ? (
+              <div
+                className={`dropzone ${over ? "over" : ""}`}
+                onDragOver={e => { e.preventDefault(); setOver(true); }}
+                onDragLeave={() => setOver(false)}
+                onDrop={e => { e.preventDefault(); setOver(false); handleFile(e.dataTransfer.files[0]); }}
+                onClick={() => document.getElementById("file-input").click()}
+              >
+                <input id="file-input" type="file" accept=".json" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
+                <svg className="dropzone-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <div className="dropzone-main">Drag and drop your scan or click to browse files</div>
+                <div className="dropzone-sub">Supports .json (Trivy, Tenable)</div>
+              </div>
+            ) : (
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+                <div className="uploaded-file">
+                  {status === "error" ? (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12"/>
+                    </svg>
+                  )}
+                  <div>
+                    <div className="uploaded-name">{file.name}</div>
+                    <div className="uploaded-size">{(file.size / 1024).toFixed(1)} KB</div>
+                  </div>
+                  <button style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 18 }} onClick={clearFile}>×</button>
+                </div>
+                {status === "uploading" && (
+                  <div className="dropzone-sub">Parsing scan file…</div>
+                )}
+                {status === "success" && (
+                  <div className="dropzone-sub" style={{ color: "#16a34a" }}>{foundCount} vulnerabilit{foundCount === 1 ? "y" : "ies"} found.</div>
+                )}
+                {status === "error" && (
+                  <div style={{ fontSize: 12, color: "#dc2626", display: "flex", alignItems: "center", gap: 10 }}>
+                    <span>{errorMsg}</span>
+                    <button
+                      onClick={() => uploadToServer(file)}
+                      style={{ background: "none", border: "none", color: "#2563eb", fontWeight: 600, cursor: "pointer", fontSize: 12 }}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 14, maxWidth: 480 }}>
+            {scanners && Object.keys(scanners).length === 0 && (
+              <div style={{ fontSize: 12, color: "#dc2626" }}>Couldn't reach the backend to list scanners. Is it running?</div>
+            )}
+            <div>
+              <label style={labelStyle}>Scanner</label>
+              <select style={inputStyle} value={scannerName} onChange={e => setScannerName(e.target.value)} disabled={liveStatus === "scanning"}>
+                {(scanners ? Object.keys(scanners) : ["trivy", "tenable"]).map(name => (
+                  <option key={name} value={name} disabled={scanners && !scanners[name].supportsLiveScan}>
+                    {name.charAt(0).toUpperCase() + name.slice(1)}{scanners && !scanners[name].supportsLiveScan ? " (upload only)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label style={labelStyle}>
+                {scannerName === "tenable" ? "Tenable scan ID" : "Image, path, or repo to scan"}
+              </label>
+              <input
+                style={inputStyle}
+                value={target}
+                onChange={e => setTarget(e.target.value)}
+                disabled={liveStatus === "scanning"}
+                placeholder={scannerName === "tenable" ? "e.g. 42" : "e.g. myapp:latest"}
+              />
+            </div>
+
+            {scannerName === "trivy" && (
+              <div style={{ display: "flex", gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Scan type</label>
+                  <select style={inputStyle} value={trivyScanType} onChange={e => setTrivyScanType(e.target.value)} disabled={liveStatus === "scanning"}>
+                    <option value="image">Container image</option>
+                    <option value="fs">Filesystem path</option>
+                    <option value="repo">Git repo URL</option>
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Runs via</label>
+                  <select style={inputStyle} value={trivyRunMode} onChange={e => setTrivyRunMode(e.target.value)} disabled={liveStatus === "scanning"}>
+                    <option value="local">Trivy CLI on backend host</option>
+                    <option value="docker">Docker (aquasec/trivy)</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={runLiveScan}
+              disabled={!target.trim() || liveStatus === "scanning"}
+              style={{
+                alignSelf: "flex-start",
+                padding: "8px 18px",
+                borderRadius: 8,
+                border: "none",
+                background: (!target.trim() || liveStatus === "scanning") ? "#93c5fd" : "#2563eb",
+                color: "#fff",
+                fontWeight: 600,
+                fontSize: 13,
+                cursor: (!target.trim() || liveStatus === "scanning") ? "default" : "pointer",
+              }}
+            >
+              {liveStatus === "scanning" ? "Scanning…" : "Start Scan"}
+            </button>
+
+            {liveStatus === "scanning" && (
+              <div className="dropzone-sub">Running {scannerName} against {target}… this can take a while for larger targets.</div>
+            )}
+            {liveStatus === "success" && (
+              <div className="dropzone-sub" style={{ color: "#16a34a" }}>{liveFoundCount} vulnerabilit{liveFoundCount === 1 ? "y" : "ies"} found.</div>
+            )}
+            {liveStatus === "error" && (
+              <div style={{ fontSize: 12, color: "#dc2626", display: "flex", alignItems: "center", gap: 10 }}>
+                <span>{liveError}</span>
+                <button
+                  onClick={runLiveScan}
+                  style={{ background: "none", border: "none", color: "#2563eb", fontWeight: 600, cursor: "pointer", fontSize: 12 }}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
-      <Footer step={0} onBack={onBack} onNext={onNext} disableNext={!file || status !== "success"} />
+      <Footer
+        step={0}
+        onBack={onBack}
+        onNext={onNext}
+        disableNext={mode === "upload" ? (!file || status !== "success") : liveStatus !== "success"}
+      />
     </>
   );
 }
