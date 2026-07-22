@@ -93,7 +93,7 @@ PART 3: RUN THE APP
 1. Make sure Docker Desktop is open and shows "running" in the
    system tray (bottom-right of your screen, whale icon).
 
-2. Unzip the "docker-demo.zip" file you were given, anywhere you
+2. Unzip the  file you were given, anywhere you
    like (e.g. Downloads or Desktop).
 
 3. Open PowerShell (does not need to be Administrator).
@@ -101,7 +101,7 @@ PART 3: RUN THE APP
 4. Navigate into the unzipped folder. For example, if you
    unzipped it to your Downloads folder:
 
-      cd C:\Users\YOUR_USERNAME\Downloads\docker-demo\docker-demo
+      cd C:\Users\YOUR_USERNAME\Downloads\{file name}\docker-demo
 
    (Replace YOUR_USERNAME with your actual Windows username, and
    adjust the path if you unzipped it somewhere else.)
@@ -113,7 +113,7 @@ PART 3: RUN THE APP
 6. Wait for the terminal to show a message that the server is
    ready (this may take a minute or two the first time).
 
-7. Open a web browser and go to:
+7. Open a web browser and go to:         (YOU CAN ALSO JSUT CLICK IT IN TERMINAL)
 
       http://localhost:5173
 
