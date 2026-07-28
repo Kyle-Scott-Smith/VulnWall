@@ -29,5 +29,10 @@ services:
       # folder so editing scanner.py (or adding new .py files) is picked
       # up by Flask's debug-mode reloader without a rebuild.
       - ./backend:/app
+    # Reads TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY / ANTHROPIC_API_KEY etc.
+    # from a .env file placed next to this docker-compose.yml (copy
+    # .env.example to .env and fill in real keys — never commit .env).
+    env_file:
+      - .env
     environment:
       - FLASK_DEBUG=1
