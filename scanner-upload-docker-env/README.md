@@ -121,3 +121,36 @@ production WSGI server (e.g. gunicorn) before deploying it for real.
     ├── requirements.txt
     └── scanner.py         # Flask API: /api/health, /api/upload-scan
 ```
+Upload → Tenable cross-reference → Claude analysis → chat
+`POST /api/upload-scan` parses the uploaded Trivy JSON as before,
+then sends every CVE ID it finds to the Tenable.io API (workbench
+vulnerability search, filtered by CVE) to check whether that CVE also
+shows up anywhere in your org's already-scanned asset inventory. Each
+finding gets a `tenable_exposure: { matched, instance_count, matches }`
+field merged in. This is a read-only lookup against Tenable's existing
+data — it does not launch a scan or touch any assets. If Tenable keys
+aren't configured, upload still works; findings just won't have
+`tenable_exposure` attached.
+`POST /api/analyze` — unchanged: runs each finding through Claude,
+returning `why`, `fixes`, `confidence`, `priority_tier` merged in. Feeds
+`CveDetailStep` in the frontend.
+`POST /api/chat` — new. Body: `{"question": "...", "vulnerabilities": [...], "history": [...]}`.
+Powers the chat bubble in the bottom-right of the UI — answers questions
+grounded only in the current scan's findings (e.g. "which CVEs affect
+host X", "what's our most severe finding"). It has no access to anything
+outside the current report.
+Setup:
+```bash
+cp .env.example .env
+# fill in TENABLE_ACCESS_KEY, TENABLE_SECRET_KEY, ANTHROPIC_API_KEY
+docker compose up --build
+```
+All three keys are optional independently — the app degrades gracefully:
+no Tenable keys → uploads work, just without `tenable_exposure`; no
+Anthropic key → uploads work, `/api/analyze` and `/api/chat` return a
+clear 503 instead of crashing the backend.
+Verified: `backend/scanner.py`'s routes were exercised end-to-end with
+stubbed Tenable/Claude SDKs (Flask test client, no live credentials needed)
+covering upload → Tenable cross-reference merge → Claude analysis → chat,
+plus the error-handling paths (missing file, bad body, missing question).
+Swap in real API keys and it's the same code path.
