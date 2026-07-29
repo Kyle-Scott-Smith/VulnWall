@@ -1,8 +1,18 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
+import logging
+
+import tenable_client
+from ai_analysis import ClaudeVulnerabilityAnalyzer
+from chatbot import ScanChatbot
+
+from scanners.registry import SCANNERS, detect_scanner, get_scanner
+from scanners.utils import dedupe_by_cve, sort_by_severity
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Allow the React dev server (and any other origin) to call this API during
 # local development. Tighten this to your actual frontend origin in production,
@@ -11,71 +21,73 @@ CORS(app)
 
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB safety limit for uploaded scan files
 
-
-def _extract_cvss(vuln):
-    """Trivy nests CVSS scores under a vendor key (nvd, redhat, ghsa, ...).
-    Prefer a V3 score from any source, then fall back to V2."""
-    cvss_block = vuln.get("CVSS")
-    if not isinstance(cvss_block, dict):
-        return None
-
-    for source in cvss_block.values():
-        if isinstance(source, dict) and source.get("V3Score") is not None:
-            return source["V3Score"]
-
-    for source in cvss_block.values():
-        if isinstance(source, dict) and source.get("V2Score") is not None:
-            return source["V2Score"]
-
-    return None
+# Built lazily on first use rather than at import time, so the app still
+# starts (upload-scan / live-scan keep working) even if ANTHROPIC_API_KEY
+# isn't set yet - /api/analyze and /api/chat just return a clear 503 instead
+# of crashing the whole backend.
+_analyzer = None
+_chatbot = None
 
 
-def _title_case_severity(severity):
-    if not severity:
-        return "Unknown"
-    return str(severity).strip().capitalize()
+def _get_analyzer():
+    global _analyzer
+    if _analyzer is None:
+        _analyzer = ClaudeVulnerabilityAnalyzer()
+    return _analyzer
 
 
-def normalize_vulnerability(vuln, asset=None):
-    return {
-        "cve": vuln.get("VulnerabilityID"),
-        "package": vuln.get("PkgName"),
-        "installedVersion": vuln.get("InstalledVersion"),
-        "severity": _title_case_severity(vuln.get("Severity")),
-        "cvss": _extract_cvss(vuln),
-        "title": vuln.get("Title") or vuln.get("VulnerabilityID"),
-        "description": vuln.get("Description"),
-        "references": vuln.get("References", []) or [],
-        "publishedDate": vuln.get("PublishedDate"),
-        "asset": asset or "unknown",
-    }
+def _get_chatbot():
+    global _chatbot
+    if _chatbot is None:
+        _chatbot = ScanChatbot()
+    return _chatbot
 
 
-def dedupe_by_cve(vulnerabilities):
-    """If the same CVE shows up more than once (e.g. across targets), keep
-    the entry with the highest CVSS score so downstream consumers see one
-    row per CVE."""
-    best_by_cve = {}
-    for vuln in vulnerabilities:
-        cve = vuln.get("cve")
-        if not cve:
-            # Keep entries with no CVE id (rare) untouched, keyed by identity.
-            best_by_cve[id(vuln)] = vuln
-            continue
-        existing = best_by_cve.get(cve)
-        if existing is None:
-            best_by_cve[cve] = vuln
-        else:
-            existing_score = existing.get("cvss") or 0
-            new_score = vuln.get("cvss") or 0
-            if new_score > existing_score:
-                best_by_cve[cve] = vuln
-    return list(best_by_cve.values())
+def _cross_reference_tenable(vulnerabilities):
+    """Best-effort: check each CVE against the org's Tenable.io asset
+    inventory and attach tenable_exposure to each finding. Silently skipped
+    if Tenable keys aren't configured, or if the lookup fails for any reason
+    - scanning should never hard-fail just because this enrichment step did.
+    Applied regardless of which scanner produced the findings."""
+    try:
+        tio = tenable_client.get_client()
+        cve_ids = [v["cve"] for v in vulnerabilities if v.get("cve")]
+        tenable_results = tenable_client.lookup_findings_by_cve(tio, cve_ids)
+        for v in vulnerabilities:
+            v["tenable_exposure"] = tenable_results.get(v.get("cve"))
+    except EnvironmentError:
+        logger.info("Tenable keys not configured - skipping CVE cross-reference")
+    except Exception:
+        logger.exception("Tenable CVE lookup failed - continuing without it")
+    return vulnerabilities
+
+
+def _finalize(vulnerabilities):
+    """Shared post-processing applied no matter which scanner produced the
+    findings or whether they came from an upload or a live scan: collapse
+    duplicate CVEs, cross-reference against Tenable's asset inventory, then
+    sort by severity/CVSS."""
+    vulnerabilities = dedupe_by_cve(vulnerabilities)
+    vulnerabilities = _cross_reference_tenable(vulnerabilities)
+    vulnerabilities = sort_by_severity(vulnerabilities)
+    return vulnerabilities
 
 
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/scanners", methods=["GET"])
+def list_scanners():
+    """Lets the frontend build a scanner picker without hardcoding names."""
+    result = {}
+    for name, scanner in SCANNERS.items():
+        info = {"supportsLiveScan": scanner.supports_run()}
+        if hasattr(scanner, "registries"):
+            info["configuredRegistries"] = scanner.registries()
+        result[name] = info
+    return jsonify(result)
 
 
 @app.route("/api/upload-scan", methods=["POST"])
@@ -100,41 +112,132 @@ def upload_scan():
     except Exception as e:
         return jsonify({"error": f"Invalid JSON: {str(e)}"}), 400
 
-    if not isinstance(data, dict):
-        return jsonify({"error": "Unrecognized scan format: expected a JSON object"}), 400
+    scanner = detect_scanner(data)
+    if scanner is None:
+        return jsonify({
+            "error": f"Unrecognized scan format. Supported scanners: {', '.join(SCANNERS)}"
+        }), 400
 
-    results = data.get("Results")
-    if not isinstance(results, list):
-        return jsonify({"error": "Unrecognized scan format: this doesn't look like a Trivy report (missing 'Results' array)"}), 400
-
-    vulnerabilities = []
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        asset = result.get("Target")
-        for vuln in result.get("Vulnerabilities", []) or []:
-            if isinstance(vuln, dict):
-                vulnerabilities.append(normalize_vulnerability(vuln, asset))
-
-    vulnerabilities = dedupe_by_cve(vulnerabilities)
-
-    # Highest severity/CVSS first so the frontend's "top risks" views are meaningful.
-    severity_rank = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Unknown": 0}
-    vulnerabilities.sort(
-        key=lambda v: (severity_rank.get(v["severity"], 0), v["cvss"] or 0),
-        reverse=True,
-    )
+    vulnerabilities = _finalize(scanner.parse(data))
 
     return jsonify({
         "status": "processed",
+        "scanner": scanner.name,
         "vulnerabilitiesFound": len(vulnerabilities),
         "vulnerabilities": vulnerabilities,
     })
+
+
+@app.route("/api/scan", methods=["POST"])
+def trigger_scan():
+    """Trigger a live scan instead of uploading a pre-generated report.
+    Body: {"scanner": "trivy", "target": "myapp:latest", ...extra options}"""
+    body = request.get_json(silent=True) or {}
+    scanner_name = body.get("scanner")
+    target = body.get("target")
+
+    if not scanner_name:
+        return jsonify({"error": f"Missing 'scanner'. Choose one of: {', '.join(SCANNERS)}"}), 400
+    if not target:
+        return jsonify({"error": "Missing 'target'"}), 400
+
+    try:
+        scanner = get_scanner(scanner_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    extra_kwargs = {k: v for k, v in body.items() if k not in ("scanner", "target")}
+
+    try:
+        raw = scanner.run(target, **extra_kwargs)
+    except NotImplementedError as e:
+        return jsonify({"error": str(e)}), 400
+    except (ValueError, RuntimeError) as e:
+        return jsonify({"error": str(e)}), 502
+
+    vulnerabilities = _finalize(scanner.parse(raw))
+
+    return jsonify({
+        "status": "processed",
+        "scanner": scanner.name,
+        "vulnerabilitiesFound": len(vulnerabilities),
+        "vulnerabilities": vulnerabilities,
+    })
+
+
+@app.route("/api/analyze", methods=["POST"])
+def analyze():
+    """
+    Runs each vulnerability through Claude and merges the result back in.
+
+    Body: {"vulnerabilities": [ ...normalized vuln objects from /api/upload-scan or /api/scan... ]}
+
+    Returns the same list with why/fixes/confidence/priority_tier/ai_generated
+    added to each entry - this is what the frontend's CveDetailStep reads.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    vulnerabilities = body.get("vulnerabilities")
+    if not isinstance(vulnerabilities, list):
+        return jsonify({"error": "Expected a 'vulnerabilities' array"}), 400
+
+    try:
+        analyzer = _get_analyzer()
+    except EnvironmentError as e:
+        return jsonify({"error": str(e)}), 503
+
+    analyzed = []
+    for vuln in vulnerabilities:
+        if not isinstance(vuln, dict):
+            continue
+        ai_result = analyzer.analyze(vuln)
+        analyzed.append({**vuln, **ai_result})
+
+    return jsonify({
+        "status": "analyzed",
+        "vulnerabilities": analyzed,
+    })
+
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    """
+    Scan-scoped chatbot. Body:
+      {
+        "question": "which CVEs affect host X",
+        "vulnerabilities": [ ...current scan's findings... ],
+        "history": [ {"role": "user"|"assistant", "content": "..."}, ... ]  # optional
+      }
+    Returns {"answer": "..."}.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    question = (body.get("question") or "").strip()
+    vulnerabilities = body.get("vulnerabilities")
+    history = body.get("history")
+
+    if not question:
+        return jsonify({"error": "Missing 'question'"}), 400
+    if not isinstance(vulnerabilities, list):
+        return jsonify({"error": "Expected a 'vulnerabilities' array for scan context"}), 400
+    if history is not None and not isinstance(history, list):
+        return jsonify({"error": "'history' must be an array if provided"}), 400
+
+    try:
+        chatbot = _get_chatbot()
+    except EnvironmentError as e:
+        return jsonify({"error": str(e)}), 503
+
+    try:
+        answer = chatbot.ask(question, vulnerabilities, history)
+    except Exception as e:
+        logger.exception("Chat request failed")
+        return jsonify({"error": f"Chat request failed: {str(e)}"}), 502
+
+    return jsonify({"answer": answer})
 
 
 if __name__ == "__main__":
     # host=0.0.0.0 so the Flask dev server is reachable from outside the
     # container (from the host machine, or from the frontend container).
     # debug=True keeps the Werkzeug auto-reloader on, so editing scanner.py
-    # picks up changes without a rebuild (the file is bind-mounted below).
+    # picks up changes without a rebuild (this folder is bind-mounted).
     app.run(host="0.0.0.0", port=5000, debug=True)

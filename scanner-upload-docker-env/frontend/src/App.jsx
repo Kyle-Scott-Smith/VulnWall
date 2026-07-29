@@ -66,12 +66,23 @@ let validationRows = [
   { id: "CVE-2026-33846", severity: "High",     status: "Validated",    desc: "Kubernetes kubelet path traversal"      },
   { id: "CVE-2026-12012", severity: "Medium",   status: "Needs Review", desc: "nginx HTTP/3 use-after-free"            },
 ];
+// Raw normalized findings from the last successful scan, kept around so the
+// chatbot can ground its answers in the same data the rest of the wizard is
+// showing (cve, title, severity, cvss, asset, package — see /api/chat).
+let lastVulnerabilities = [];
 
 // Turns the parsed vulnerability list returned by the scanner-upload backend
 // into the same shapes the wizard's UI already renders (vulnRows, cveDetails,
 // allRisks, validationRows), replacing the demo placeholder data above.
+//
+// Each entry in `vulnerabilities` may already carry real AI fields (why,
+// fixes, confidence, priority_tier, ai_generated) if it went through
+// POST /api/analyze first — see runAiAnalysis() below. If those fields
+// aren't present (analysis skipped or failed), fall back to the same
+// heuristic placeholders as before so the UI never breaks.
 function applyScanResults(vulnerabilities) {
   const list = Array.isArray(vulnerabilities) ? vulnerabilities : [];
+  lastVulnerabilities = list;
 
   vulnRows = list.map(v => ({
     id: v.cve || v.title,
@@ -83,36 +94,51 @@ function applyScanResults(vulnerabilities) {
 
   cveDetails = Object.fromEntries(list.map(v => {
     const id = v.cve || v.title;
-    // No AI-analysis service is wired up yet, so "confidence" and "fixes"
-    // are reasonable stand-ins derived from the raw scan data rather than
-    // real AI output — swap these out once the AI teammate's endpoint exists.
-    const fixes = [];
-    if (v.package && v.installedVersion) {
-      fixes.push(`Upgrade ${v.package} beyond the installed version (${v.installedVersion})`);
-    } else if (v.package) {
-      fixes.push(`Upgrade ${v.package} to a patched version`);
+    const hasAiResult = v.ai_generated !== undefined; // set by /api/analyze on every entry it touches
+
+    let why, fixes, confidence;
+    if (hasAiResult) {
+      why = v.why || "No explanation was returned for this finding.";
+      fixes = Array.isArray(v.fixes) && v.fixes.length ? v.fixes : ["Review the vendor advisory and apply the recommended patch."];
+      confidence = typeof v.confidence === "number" ? v.confidence : 50;
+    } else {
+      // Analysis hasn't run yet (or failed to reach the backend) — same
+      // stand-in heuristics as before so the step still renders something.
+      fixes = [];
+      if (v.package && v.installedVersion) {
+        fixes.push(`Upgrade ${v.package} beyond the installed version (${v.installedVersion})`);
+      } else if (v.package) {
+        fixes.push(`Upgrade ${v.package} to a patched version`);
+      }
+      fixes.push(`Review the vendor advisory for ${id}`);
+      fixes.push("Re-scan the asset after remediation to confirm the fix");
+      why = v.description || "No description was provided by the scanner for this finding.";
+      confidence = typeof v.cvss === "number" && v.description ? 95 : 65;
     }
-    fixes.push(`Review the vendor advisory for ${id}`);
-    fixes.push("Re-scan the asset after remediation to confirm the fix");
 
     return [id, {
       cvss: typeof v.cvss === "number" ? v.cvss : 0,
-      confidence: typeof v.cvss === "number" && v.description ? 95 : 65,
+      confidence,
       severity: v.severity || "Unknown",
       title: v.title || id,
-      why: v.description || "No description was provided by the scanner for this finding.",
+      why,
       fixes,
+      priorityTier: v.priority_tier || null,
+      aiGenerated: !!v.ai_generated,
     }];
   }));
 
   allRisks = Object.entries(cveDetails).map(([id, d]) => ({ id, cvss: d.cvss, severity: d.severity, title: d.title }));
 
-  // No real cross-checking service exists yet either; flag anything missing
-  // a CVSS score or description as needing a human look, and treat complete
-  // records as validated. Replace with real validation results later.
+  // Flag anything missing a CVSS score or description as needing a human
+  // look; if real AI analysis ran and came back with low confidence,
+  // flag that too instead of treating it as automatically validated.
   validationRows = list.map(v => {
     const id = v.cve || v.title;
-    const complete = typeof v.cvss === "number" && !!v.description;
+    const hasAiResult = v.ai_generated !== undefined;
+    const complete = hasAiResult
+      ? v.ai_generated && (typeof v.confidence !== "number" || v.confidence >= 60)
+      : typeof v.cvss === "number" && !!v.description;
     return {
       id,
       severity: v.severity || "Unknown",
@@ -120,6 +146,28 @@ function applyScanResults(vulnerabilities) {
       desc: v.title || v.description || "",
     };
   });
+}
+
+// Calls POST /api/analyze with the vulnerabilities parsed from either
+// upload path, and returns the same list with AI fields merged in.
+// On any failure (backend unreachable, ANTHROPIC_API_KEY missing, etc.)
+// falls back to returning the list unchanged — applyScanResults() then
+// uses its heuristic placeholders instead of hard-failing the wizard.
+async function runAiAnalysis(vulnerabilities) {
+  if (!Array.isArray(vulnerabilities) || vulnerabilities.length === 0) return vulnerabilities;
+  try {
+    const res = await fetch(`${API_BASE}/api/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vulnerabilities }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "AI analysis failed");
+    return data.vulnerabilities || vulnerabilities;
+  } catch (err) {
+    console.warn("AI analysis unavailable, showing raw scan results:", err.message);
+    return vulnerabilities;
+  }
 }
 
 //styling
@@ -522,12 +570,19 @@ function SignUp({ onSignUp, onGoSignIn }) {
 }
 
 //Upload step 1: Upload Scan
+// The backend cross-references every CVE in an uploaded/scanned file against
+// the Tenable.io API automatically (see /api/upload-scan and /api/scan), and
+// results are then run through AI analysis (/api/analyze) before landing in
+// the wizard. Both entry points remain available: upload a pre-generated
+// report, or trigger a live scan directly against a target.
 function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
+  const [mode, setMode] = useState("upload"); // "upload" | "live"
   const [over, setOver] = useState(false);
   // status: idle | uploading | success | error
   const [status, setStatus] = useState("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [foundCount, setFoundCount] = useState(0);
+  const [tenableMatchCount, setTenableMatchCount] = useState(0);
 
   const uploadToServer = async f => {
     setStatus("uploading");
@@ -538,9 +593,17 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
       const res = await fetch(`${API_BASE}/api/upload-scan`, { method: "POST", body: formData });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Upload failed");
-      onParsed(data.vulnerabilities || []);
-      setFoundCount(data.vulnerabilitiesFound ?? (data.vulnerabilities || []).length);
+
+      const vulnerabilities = data.vulnerabilities || [];
+      onParsed(vulnerabilities); // show raw + Tenable cross-reference results immediately...
+      setFoundCount(data.vulnerabilitiesFound ?? vulnerabilities.length);
+      setTenableMatchCount(vulnerabilities.filter(v => v.tenable_exposure?.matched).length);
       setStatus("success");
+
+      // ...then swap in real AI analysis once it comes back (falls back to
+      // placeholders inside applyScanResults if /api/analyze fails).
+      const analyzed = await runAiAnalysis(vulnerabilities);
+      onParsed(analyzed);
     } catch (err) {
       setStatus("error");
       setErrorMsg(err.message || "Could not reach the scanner service. Is the backend running?");
@@ -559,66 +622,248 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
     setErrorMsg("");
   };
 
+  // --- Live scan (trigger Trivy/Tenable/etc. directly, no file needed) ---
+  const [scanners, setScanners] = useState(null); // null while loading, then { trivy: {...}, tenable: {...} }
+  const [scannerName, setScannerName] = useState("trivy");
+  const [target, setTarget] = useState("");
+  const [trivyScanType, setTrivyScanType] = useState("image");
+  const [trivyRunMode, setTrivyRunMode] = useState("local");
+  // liveStatus: idle | scanning | success | error
+  const [liveStatus, setLiveStatus] = useState("idle");
+  const [liveError, setLiveError] = useState("");
+  const [liveFoundCount, setLiveFoundCount] = useState(0);
+  const [liveTenableMatchCount, setLiveTenableMatchCount] = useState(0);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/scanners`)
+      .then(res => res.json())
+      .then(data => {
+        setScanners(data);
+        const liveCapable = Object.keys(data).find(name => data[name].supportsLiveScan);
+        if (liveCapable) setScannerName(liveCapable);
+      })
+      .catch(() => setScanners({}));
+  }, []);
+
+  const runLiveScan = async () => {
+    if (!target.trim()) return;
+    setLiveStatus("scanning");
+    setLiveError("");
+    try {
+      const body = { scanner: scannerName, target: target.trim() };
+      if (scannerName === "trivy") {
+        body.scan_type = trivyScanType;
+        body.mode = trivyRunMode;
+      }
+      const res = await fetch(`${API_BASE}/api/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Scan failed");
+
+      const vulnerabilities = data.vulnerabilities || [];
+      onParsed(vulnerabilities); // show raw + Tenable cross-reference results immediately...
+      setLiveFoundCount(data.vulnerabilitiesFound ?? vulnerabilities.length);
+      setLiveTenableMatchCount(vulnerabilities.filter(v => v.tenable_exposure?.matched).length);
+      setLiveStatus("success");
+
+      // ...then swap in real AI analysis once it comes back, same as the
+      // upload path — keeps both entry points behaving consistently.
+      const analyzed = await runAiAnalysis(vulnerabilities);
+      onParsed(analyzed);
+    } catch (err) {
+      setLiveStatus("error");
+      setLiveError(err.message || "Could not reach the scanner service. Is the backend running?");
+    }
+  };
+
+  const switchMode = next => {
+    setMode(next);
+    // Reset whichever path isn't active so switching back and forth doesn't
+    // carry over a stale success/error state.
+    if (next === "upload") { setLiveStatus("idle"); setLiveError(""); }
+    else { clearFile(); }
+  };
+
+  const tabStyle = active => ({
+    padding: "6px 14px",
+    borderRadius: 20,
+    border: "1px solid " + (active ? "#2563eb" : "#e5e7eb"),
+    background: active ? "#2563eb" : "#fff",
+    color: active ? "#fff" : "#374151",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+  });
+
+  const inputStyle = { padding: "8px 10px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, width: "100%" };
+  const labelStyle = { fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 4, display: "block" };
+
   return (
     <>
       <div className="page-card">
         <div className="page-title">Upload Scan</div>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-          {!file ? (
-            <div
-              className={`dropzone ${over ? "over" : ""}`}
-              onDragOver={e => { e.preventDefault(); setOver(true); }}
-              onDragLeave={() => setOver(false)}
-              onDrop={e => { e.preventDefault(); setOver(false); handleFile(e.dataTransfer.files[0]); }}
-              onClick={() => document.getElementById("file-input").click()}
-            >
-              <input id="file-input" type="file" accept=".json" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
-              <svg className="dropzone-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-              </svg>
-              <div className="dropzone-main">Drag and drop your scan or click to browse files</div>
-              <div className="dropzone-sub">Supports .json (Trivy)</div>
-            </div>
-          ) : (
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-              <div className="uploaded-file">
-                {status === "error" ? (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                  </svg>
-                ) : (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                )}
-                <div>
-                  <div className="uploaded-name">{file.name}</div>
-                  <div className="uploaded-size">{(file.size / 1024).toFixed(1)} KB</div>
-                </div>
-                <button style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 18 }} onClick={clearFile}>×</button>
-              </div>
-              {status === "uploading" && (
-                <div className="dropzone-sub">Parsing scan file…</div>
-              )}
-              {status === "success" && (
-                <div className="dropzone-sub" style={{ color: "#16a34a" }}>{foundCount} vulnerabilit{foundCount === 1 ? "y" : "ies"} found.</div>
-              )}
-              {status === "error" && (
-                <div style={{ fontSize: 12, color: "#dc2626", display: "flex", alignItems: "center", gap: 10 }}>
-                  <span>{errorMsg}</span>
-                  <button
-                    onClick={() => uploadToServer(file)}
-                    style={{ background: "none", border: "none", color: "#2563eb", fontWeight: 600, cursor: "pointer", fontSize: 12 }}
-                  >
-                    Retry
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <button style={tabStyle(mode === "upload")} onClick={() => switchMode("upload")}>Upload a report</button>
+          <button style={tabStyle(mode === "live")} onClick={() => switchMode("live")}>Run a live scan</button>
         </div>
+
+        {mode === "upload" ? (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+            {!file ? (
+              <div
+                className={`dropzone ${over ? "over" : ""}`}
+                onDragOver={e => { e.preventDefault(); setOver(true); }}
+                onDragLeave={() => setOver(false)}
+                onDrop={e => { e.preventDefault(); setOver(false); handleFile(e.dataTransfer.files[0]); }}
+                onClick={() => document.getElementById("file-input").click()}
+              >
+                <input id="file-input" type="file" accept=".json" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
+                <svg className="dropzone-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+                <div className="dropzone-main">Drag and drop your scan or click to browse files</div>
+                <div className="dropzone-sub">Supports .json (Trivy, Tenable) — CVEs are cross-referenced against Tenable.io automatically</div>
+              </div>
+            ) : (
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+                <div className="uploaded-file">
+                  {status === "error" ? (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12"/>
+                    </svg>
+                  )}
+                  <div>
+                    <div className="uploaded-name">{file.name}</div>
+                    <div className="uploaded-size">{(file.size / 1024).toFixed(1)} KB</div>
+                  </div>
+                  <button style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "#9ca3af", fontSize: 18 }} onClick={clearFile}>×</button>
+                </div>
+                {status === "uploading" && (
+                  <div className="dropzone-sub">Parsing scan file and checking CVEs against Tenable.io…</div>
+                )}
+                {status === "success" && (
+                  <div className="dropzone-sub" style={{ color: "#16a34a" }}>
+                    {foundCount} vulnerabilit{foundCount === 1 ? "y" : "ies"} found
+                    {tenableMatchCount > 0 && ` · ${tenableMatchCount} also confirmed in your Tenable.io inventory`}.
+                  </div>
+                )}
+                {status === "error" && (
+                  <div style={{ fontSize: 12, color: "#dc2626", display: "flex", alignItems: "center", gap: 10 }}>
+                    <span>{errorMsg}</span>
+                    <button
+                      onClick={() => uploadToServer(file)}
+                      style={{ background: "none", border: "none", color: "#2563eb", fontWeight: 600, cursor: "pointer", fontSize: 12 }}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 14, maxWidth: 480 }}>
+            {scanners && Object.keys(scanners).length === 0 && (
+              <div style={{ fontSize: 12, color: "#dc2626" }}>Couldn't reach the backend to list scanners. Is it running?</div>
+            )}
+            <div>
+              <label style={labelStyle}>Scanner</label>
+              <select style={inputStyle} value={scannerName} onChange={e => setScannerName(e.target.value)} disabled={liveStatus === "scanning"}>
+                {(scanners ? Object.keys(scanners) : ["trivy", "tenable"]).map(name => (
+                  <option key={name} value={name} disabled={scanners && !scanners[name].supportsLiveScan}>
+                    {name.charAt(0).toUpperCase() + name.slice(1)}{scanners && !scanners[name].supportsLiveScan ? " (upload only)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label style={labelStyle}>
+                {scannerName === "tenable" ? "Tenable scan ID" : "Image, path, or repo to scan"}
+              </label>
+              <input
+                style={inputStyle}
+                value={target}
+                onChange={e => setTarget(e.target.value)}
+                disabled={liveStatus === "scanning"}
+                placeholder={scannerName === "tenable" ? "e.g. 42" : "e.g. myapp:latest"}
+              />
+            </div>
+
+            {scannerName === "trivy" && (
+              <div style={{ display: "flex", gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Scan type</label>
+                  <select style={inputStyle} value={trivyScanType} onChange={e => setTrivyScanType(e.target.value)} disabled={liveStatus === "scanning"}>
+                    <option value="image">Container image</option>
+                    <option value="fs">Filesystem path</option>
+                    <option value="repo">Git repo URL</option>
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={labelStyle}>Runs via</label>
+                  <select style={inputStyle} value={trivyRunMode} onChange={e => setTrivyRunMode(e.target.value)} disabled={liveStatus === "scanning"}>
+                    <option value="local">Trivy CLI on backend host</option>
+                    <option value="docker">Docker (aquasec/trivy)</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={runLiveScan}
+              disabled={!target.trim() || liveStatus === "scanning"}
+              style={{
+                alignSelf: "flex-start",
+                padding: "8px 18px",
+                borderRadius: 8,
+                border: "none",
+                background: (!target.trim() || liveStatus === "scanning") ? "#93c5fd" : "#2563eb",
+                color: "#fff",
+                fontWeight: 600,
+                fontSize: 13,
+                cursor: (!target.trim() || liveStatus === "scanning") ? "default" : "pointer",
+              }}
+            >
+              {liveStatus === "scanning" ? "Scanning…" : "Start Scan"}
+            </button>
+
+            {liveStatus === "scanning" && (
+              <div className="dropzone-sub">Running {scannerName} against {target}… this can take a while for larger targets.</div>
+            )}
+            {liveStatus === "success" && (
+              <div className="dropzone-sub" style={{ color: "#16a34a" }}>
+                {liveFoundCount} vulnerabilit{liveFoundCount === 1 ? "y" : "ies"} found
+                {liveTenableMatchCount > 0 && ` · ${liveTenableMatchCount} also confirmed in your Tenable.io inventory`}.
+              </div>
+            )}
+            {liveStatus === "error" && (
+              <div style={{ fontSize: 12, color: "#dc2626", display: "flex", alignItems: "center", gap: 10 }}>
+                <span>{liveError}</span>
+                <button
+                  onClick={runLiveScan}
+                  style={{ background: "none", border: "none", color: "#2563eb", fontWeight: 600, cursor: "pointer", fontSize: 12 }}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
-      <Footer step={0} onBack={onBack} onNext={onNext} disableNext={!file || status !== "success"} />
+      <Footer
+        step={0}
+        onBack={onBack}
+        onNext={onNext}
+        disableNext={mode === "upload" ? (!file || status !== "success") : liveStatus !== "success"}
+      />
     </>
   );
 }
@@ -1417,6 +1662,107 @@ function Dashboard() {
 }
 
 //Root
+// Floating scan-scoped chatbot. Replaces the static chat-bubble placeholder.
+// Answers questions about lastVulnerabilities (the current scan/report) via
+// POST /api/chat — see chatbot.py. Only available once a scan has been
+// uploaded; otherwise it opens with an explanatory empty state instead of
+// silently sending an empty context to the backend.
+function ChatWidget() {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState([]); // {role: "user"|"assistant", content}
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, open]);
+
+  const send = async () => {
+    const question = input.trim();
+    if (!question || sending) return;
+    setInput("");
+    const nextMessages = [...messages, { role: "user", content: question }];
+    setMessages(nextMessages);
+    setSending(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          vulnerabilities: lastVulnerabilities,
+          history: nextMessages,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Chat request failed");
+      setMessages(prev => [...prev, { role: "assistant", content: data.answer }]);
+    } catch (err) {
+      setMessages(prev => [...prev, { role: "assistant", content: `⚠️ ${err.message || "Could not reach the chat service."}` }]);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleKeyDown = e => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  };
+
+  if (!open) {
+    return (
+      <div className="chat-bubble" onClick={() => setOpen(true)} title="Ask about this scan">💬</div>
+    );
+  }
+
+  return (
+    <div style={{ position: "fixed", bottom: 28, right: 28, width: 340, maxWidth: "90vw", height: 440, background: "#fff", borderRadius: 16, boxShadow: "0 8px 32px rgba(0,0,0,.18)", display: "flex", flexDirection: "column", overflow: "hidden", zIndex: 100, fontFamily: "DM Sans, sans-serif" }}>
+      <div style={{ padding: "12px 16px", background: "#7c3aed", color: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ fontSize: 14, fontWeight: 700 }}>Scan Assistant</div>
+        <span onClick={() => setOpen(false)} style={{ cursor: "pointer", fontSize: 18, lineHeight: 1 }}>×</span>
+      </div>
+
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 10, background: "#f9fafb" }}>
+        {messages.length === 0 && (
+          <div style={{ fontSize: 12, color: "#9ca3af", padding: 8 }}>
+            {lastVulnerabilities.length === 0
+              ? "Upload a scan first — I answer questions using the vulnerabilities found in your current report only."
+              : `Ask me anything about the ${lastVulnerabilities.length} finding(s) in your current scan — e.g. "which CVEs affect ${lastVulnerabilities[0]?.asset || "this asset"}?" or "what's our most severe issue?"`}
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "85%", background: m.role === "user" ? "#2563eb" : "#eef0f4", color: m.role === "user" ? "#fff" : "#1f2937", padding: "8px 12px", borderRadius: 12, fontSize: 13, whiteSpace: "pre-wrap" }}>
+            {m.content}
+          </div>
+        ))}
+        {sending && (
+          <div style={{ alignSelf: "flex-start", fontSize: 12, color: "#9ca3af", padding: "4px 8px" }}>Thinking…</div>
+        )}
+      </div>
+
+      <div style={{ padding: 10, borderTop: "1px solid #e5e7eb", display: "flex", gap: 8 }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Ask about this scan…"
+          style={{ flex: 1, padding: "8px 12px", borderRadius: 20, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", outline: "none" }}
+        />
+        <button
+          onClick={send}
+          disabled={sending || !input.trim()}
+          style={{ padding: "8px 14px", borderRadius: 20, border: "none", background: input.trim() ? "#2563eb" : "#e5e7eb", color: input.trim() ? "#fff" : "#9ca3af", fontSize: 13, fontWeight: 600, cursor: input.trim() ? "pointer" : "default" }}
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [uploadStep, setUploadStep] = useState(0);
@@ -1483,7 +1829,7 @@ export default function App() {
         {activeTab === "tickets" && <TicketList tickets={liveTickets} />}
         {activeTab === "profile" && <Profile onSignOut={() => { setAuthed(false); setAuthScreen("signin"); setUserName(""); setUserEmail(""); }} userName={userName} userEmail={userEmail} />}
 
-        <div className="chat-bubble">💬</div>
+        <ChatWidget />
       </div>
     </>
   );
