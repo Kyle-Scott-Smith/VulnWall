@@ -1245,6 +1245,8 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
   });
 
   const [sent, setSent] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState(null);
   const priorityColor = p => p === "P1" ? { bg: "#fef2f2", color: "#dc2626" } : p === "P2" ? { bg: "#fff7ed", color: "#ea580c" } : { bg: "#f0fdf4", color: "#16a34a" };
 
   if (sent) {
@@ -1293,27 +1295,67 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
             <button onClick={onBack} style={{ padding: "10px 24px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>Go back</button>
           </div>
         ) : (
-          <button
-            onClick={() => {
-              const newTickets = tickets.map((t, i) => ({
-                id: `T-${String(106 + i).padStart(3, "0")}`,
-                cve: t.id,
-                title: t.title,
-                priority: t.priority,
-                status: "Open",
-                assigned: t.assignTo,
-                date: new Date().toLocaleDateString("en-GB").replace(/\//g, "-"),
-                cvss: cveDetails[t.id]?.cvss || 0,
-                confidence: cveDetails[t.id]?.confidence || 0,
-                fixes: cveDetails[t.id]?.fixes || [],
-                why: cveDetails[t.id]?.why || "",
-              }));
-              onSubmit(newTickets);
-              setSent(true);
-            }}
-            style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
-            Send to Jira
-          </button>
+          <>
+            {sendError && (
+              <div style={{ padding: "10px 14px", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, fontSize: 12, color: "#dc2626", marginBottom: 12 }}>
+                {sendError}
+              </div>
+            )}
+            <button
+              disabled={sending}
+              onClick={async () => {
+                setSending(true);
+                setSendError(null);
+
+                // Try pushing each approved ticket to the connected Jira
+                // account. If Jira isn't connected/configured, or a push
+                // fails, we still fall back to the local demo ticket list
+                // so the wizard doesn't get stuck — but we surface the
+                // reason so it's clear nothing silently failed.
+                let jiraFailures = 0;
+                try {
+                  const statusRes = await fetch(`${API_BASE}/api/jira/status`, { credentials: "include" });
+                  const statusData = await statusRes.json();
+
+                  if (statusData.connected) {
+                    for (const t of tickets) {
+                      const res = await fetch(`${API_BASE}/api/jira/create-ticket`, {
+                        method: "POST",
+                        credentials: "include",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ title: t.title, description: cveDetails[t.id]?.why || "", priority: t.priority }),
+                      });
+                      if (!res.ok) jiraFailures += 1;
+                    }
+                    if (jiraFailures > 0) {
+                      setSendError(`${jiraFailures} of ${tickets.length} ticket(s) failed to push to Jira. They were still added to the local ticket list below.`);
+                    }
+                  }
+                } catch {
+                  setSendError("Couldn't reach the Jira integration — tickets were still added to the local ticket list below.");
+                }
+
+                const newTickets = tickets.map((t, i) => ({
+                  id: `T-${String(106 + i).padStart(3, "0")}`,
+                  cve: t.id,
+                  title: t.title,
+                  priority: t.priority,
+                  status: "Open",
+                  assigned: t.assignTo,
+                  date: new Date().toLocaleDateString("en-GB").replace(/\//g, "-"),
+                  cvss: cveDetails[t.id]?.cvss || 0,
+                  confidence: cveDetails[t.id]?.confidence || 0,
+                  fixes: cveDetails[t.id]?.fixes || [],
+                  why: cveDetails[t.id]?.why || "",
+                }));
+                onSubmit(newTickets);
+                setSending(false);
+                setSent(true);
+              }}
+              style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#111", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: sending ? "default" : "pointer", opacity: sending ? 0.6 : 1 }}>
+              {sending ? "Sending…" : "Send to Jira"}
+            </button>
+          </>
         )}
       </div>
       <Footer step={5} onBack={onBack} onNext={onNext} nextLabel="Done" />
@@ -1519,6 +1561,75 @@ function TicketList({ tickets: initialTickets }) {
   );
 }
 
+//Jira Connect — isolated component, only talks to /api/jira/* endpoints.
+// Doesn't touch any other app state; safe to remove without breaking
+// anything else if the Jira integration is ever disabled.
+function JiraConnect() {
+  const [status, setStatus] = useState({ loading: true });
+
+  const refreshStatus = () => {
+    fetch(`${API_BASE}/api/jira/status`, { credentials: "include" })
+      .then(res => res.json())
+      .then(data => setStatus({ loading: false, ...data }))
+      .catch(() => setStatus({ loading: false, configured: false, connected: false, error: true }));
+  };
+
+  useEffect(() => {
+    refreshStatus();
+    // If we just got redirected back from Atlassian, drop the ?jira=connected
+    // query param so refreshing the page doesn't look odd, and re-check status.
+    if (new URLSearchParams(window.location.search).get("jira") === "connected") {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
+  const handleDisconnect = () => {
+    fetch(`${API_BASE}/api/jira/disconnect`, { method: "POST", credentials: "include" })
+      .then(refreshStatus);
+  };
+
+  if (status.loading) return null;
+
+  if (!status.configured) {
+    return (
+      <div style={{ padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", fontSize: 12, color: "#9ca3af" }}>
+        Jira integration is not configured on this server.
+      </div>
+    );
+  }
+
+  if (status.connected) {
+    return (
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f0fdf4", borderRadius: 10, border: "1px solid #bbf7d0" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#15803d" }}>✓ Connected to Jira</div>
+          <div style={{ fontSize: 12, color: "#166534" }}>{status.site}.atlassian.net</div>
+        </div>
+        <button
+          onClick={handleDisconnect}
+          style={{ padding: "8px 14px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
+          Disconnect
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb" }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Jira</div>
+        <div style={{ fontSize: 12, color: "#6b7280" }}>Not connected</div>
+      </div>
+      <a href={`${API_BASE}/api/jira/connect`}>
+        <button
+          style={{ padding: "8px 14px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+          Connect Jira
+        </button>
+      </a>
+    </div>
+  );
+}
+
 //Profile
 function Profile({ onSignOut, userName, userEmail }) {
   const [notifications, setNotifications] = useState(true);
@@ -1589,6 +1700,11 @@ function Profile({ onSignOut, userName, userEmail }) {
             <option>Platform Engineering</option>
           </select>
         </div>
+      </div>
+
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Integrations</div>
+        <JiraConnect />
       </div>
 
       <button

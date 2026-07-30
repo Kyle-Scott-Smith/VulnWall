@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
 import logging
+import os
+import secrets
 
 import tenable_client
 from ai_analysis import ClaudeVulnerabilityAnalyzer
@@ -9,15 +11,25 @@ from chatbot import ScanChatbot
 
 from scanners.registry import SCANNERS, detect_scanner, get_scanner
 from scanners.utils import dedupe_by_cve, sort_by_severity
+from jira_integration import jira_bp
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Needed for session cookies (used only by the Jira blueprint's OAuth
+# state + per-browser token lookup — nothing else in the app uses
+# sessions). Falls back to a random key per process start if unset,
+# which is fine for local demo use; set FLASK_SECRET_KEY explicitly for
+# anything longer-lived than a single dev session.
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
+
 # Allow the React dev server (and any other origin) to call this API during
 # local development. Tighten this to your actual frontend origin in production,
 # e.g. CORS(app, origins=["https://your-frontend-domain"]).
-CORS(app)
+CORS(app, supports_credentials=True)
+
+app.register_blueprint(jira_bp)
 
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB safety limit for uploaded scan files
 
@@ -131,7 +143,9 @@ def upload_scan():
 @app.route("/api/scan", methods=["POST"])
 def trigger_scan():
     """Trigger a live scan instead of uploading a pre-generated report.
-    Body: {"scanner": "trivy", "target": "myapp:latest", ...extra options}"""
+    Body: {"scanner": "trivy", "target": "myapp:latest", ...extra options}
+    Extra JSON fields are passed straight through to that scanner's run()
+    (e.g. Trivy accepts scan_type/mode; see scanners/trivy.py)."""
     body = request.get_json(silent=True) or {}
     scanner_name = body.get("scanner")
     target = body.get("target")
@@ -239,5 +253,6 @@ if __name__ == "__main__":
     # host=0.0.0.0 so the Flask dev server is reachable from outside the
     # container (from the host machine, or from the frontend container).
     # debug=True keeps the Werkzeug auto-reloader on, so editing scanner.py
-    # picks up changes without a rebuild (this folder is bind-mounted).
+    # or any scanners/*.py file picks up changes without a rebuild (this
+    # folder is bind-mounted — see docker-compose.yml).
     app.run(host="0.0.0.0", port=5000, debug=True)

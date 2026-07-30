@@ -29,11 +29,13 @@ services:
       # folder so editing scanner.py (or adding new .py files) is picked
       # up by Flask's debug-mode reloader without a rebuild.
       - ./backend:/app
-    # Reads TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY / ANTHROPIC_API_KEY /
-    # REGISTRY_CREDENTIALS etc. from a .env file placed next to this
-    # docker-compose.yml (copy .env.example to .env and fill in real
-    # values — never commit .env).
-    env_file:
-      - .env
     environment:
       - FLASK_DEBUG=1
+    # Loads backend/.env (copy backend/.env.example -> backend/.env and
+    # fill in real values) so TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY /
+    # ANTHROPIC_API_KEY / JIRA_CLIENT_ID / JIRA_CLIENT_SECRET / etc. all
+    # actually reach the container. Compose won't error if the file is
+    # missing, but the Tenable/AI/Jira features will each report
+    # "not configured" until it exists.
+    env_file:
+      - ./backend/.env
