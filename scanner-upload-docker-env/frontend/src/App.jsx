@@ -432,6 +432,22 @@ function Footer({ step, onBack, onNext, nextLabel = "Next", disableNext = false 
 }
 
 //Sign In
+// Basic "looks like an email" check — not a full RFC 5322 validator, just
+// enough to catch typos like missing "@" or a domain with no dot.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Password rule: 8+ chars, at least one lowercase, one uppercase, one
+// number, and one symbol. Stated in the UI hint so it's obvious upfront
+// rather than only surfacing after a rejected signup.
+function passwordError(password) {
+  if (password.length < 8) return "Password must be at least 8 characters";
+  if (!/[a-z]/.test(password)) return "Password must include a lowercase letter";
+  if (!/[A-Z]/.test(password)) return "Password must include an uppercase letter";
+  if (!/[0-9]/.test(password)) return "Password must include a number";
+  if (!/[^A-Za-z0-9]/.test(password)) return "Password must include a symbol (e.g. ! @ # $)";
+  return null;
+}
+
 function SignIn({ onSignIn, onGoSignUp, accounts }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -439,6 +455,7 @@ function SignIn({ onSignIn, onGoSignUp, accounts }) {
 
   const handle = () => {
     if (!email || !password) { setError("Please fill in all fields"); return; }
+    if (!EMAIL_RE.test(email)) { setError("Please enter a valid email address"); return; }
     const valid = accounts && accounts.find(a => a.email === email && a.password === password);
     if (!valid) { setError("Invalid email or password. Please sign up first."); return; }
     onSignIn(email, password);
@@ -490,7 +507,7 @@ function SignIn({ onSignIn, onGoSignUp, accounts }) {
 }
 
 //Sign Up
-function SignUp({ onSignUp, onGoSignIn }) {
+function SignUp({ onSignUp, onGoSignIn, accounts }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -499,6 +516,12 @@ function SignUp({ onSignUp, onGoSignIn }) {
 
   const handle = () => {
     if (!name || !email || !password || !confirm) { setError("Please fill in all fields"); return; }
+    if (!EMAIL_RE.test(email)) { setError("Please enter a valid email address"); return; }
+    if (accounts && accounts.some(a => a.email.toLowerCase() === email.toLowerCase())) {
+      setError("An account with this email already exists"); return;
+    }
+    const pwError = passwordError(password);
+    if (pwError) { setError(pwError); return; }
     if (password !== confirm) { setError("Passwords do not match"); return; }
     onSignUp(name, email, password);
   };
@@ -541,6 +564,7 @@ function SignUp({ onSignUp, onGoSignIn }) {
             placeholder="••••••••"
             style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" }}
           />
+          <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>8+ characters, with uppercase, lowercase, a number, and a symbol</div>
         </div>
 
         <div style={{ marginBottom: 24 }}>
@@ -2038,6 +2062,19 @@ export default function App() {
 
   const goToTab = tab => { setActiveTab(tab); setUploadStep(0); setCveId(null); setUploadedFile(null); };
 
+  // Clears everything that belongs to the signed-in user's session, so the
+  // next person who signs in doesn't inherit the previous user's tickets,
+  // in-progress upload, or selections.
+  const resetSession = () => {
+    setActiveTab("dashboard");
+    setUploadStep(0);
+    setCveId(null);
+    setSelected(vulnRows.map(r => r.id));
+    setSubmittedTickets([]);
+    setLiveTickets([]);
+    setUploadedFile(null);
+  };
+
   const handleScanParsed = vulnerabilities => {
     applyScanResults(vulnerabilities);
     setSelected(vulnRows.map(r => r.id));
@@ -2065,7 +2102,7 @@ export default function App() {
         <div className="shell">
           {authScreen === "signin"
             ? <SignIn onSignIn={(email, password) => { const account = accounts.find(a => a.email === email && a.password === password); if (account) { setUserName(account.name); setUserEmail(email); setAuthed(true); } }} onGoSignUp={() => setAuthScreen("signup")} accounts={accounts} />
-            : <SignUp onSignUp={(name, email, password) => { setAccounts(prev => [...prev, { name, email, password }]); setUserName(name); setUserEmail(email); setAuthScreen("signin"); }} onGoSignIn={() => setAuthScreen("signin")} />
+            : <SignUp onSignUp={(name, email, password) => { setAccounts(prev => [...prev, { name, email, password }]); setUserName(name); setUserEmail(email); setAuthScreen("signin"); }} onGoSignIn={() => setAuthScreen("signin")} accounts={accounts} />
           }
         </div>
       </>
@@ -2085,7 +2122,7 @@ export default function App() {
         {activeTab === "dashboard" && <Dashboard />}
         {activeTab === "upload-scan" && renderUploadContent()}
         {activeTab === "tickets" && <TicketList tickets={liveTickets} />}
-        {activeTab === "profile" && <Profile onSignOut={() => { setAuthed(false); setAuthScreen("signin"); setUserName(""); setUserEmail(""); }} userName={userName} userEmail={userEmail} />}
+        {activeTab === "profile" && <Profile onSignOut={() => { resetSession(); setAuthed(false); setAuthScreen("signin"); setUserName(""); setUserEmail(""); }} userName={userName} userEmail={userEmail} />}
 
         <ChatWidget />
       </div>
