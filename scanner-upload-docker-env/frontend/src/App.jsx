@@ -927,8 +927,20 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
 }
 
 //Upload step 2: AI Summary
+const AI_RISK_SORT_FIELDS = { "None": null, "CVE": "id", "Severity": "severity", "CVSS": "cvss" };
+
 function AISummaryStep({ onNext, onBack, onCveClick }) {
   const [showAll, setShowAll] = useState(false);
+  const [riskSeverityFilter, setRiskSeverityFilter] = useState("All");
+  const [riskSortBy, setRiskSortBy] = useState("None");
+  const [riskSortDir, setRiskSortDir] = useState("asc");
+
+  const filteredRisks = sortRows(
+    allRisks.filter(r => riskSeverityFilter === "All" || r.severity === riskSeverityFilter),
+    AI_RISK_SORT_FIELDS[riskSortBy],
+    riskSortDir
+  );
+
   return (
     <>
       <div className="page-card">
@@ -959,26 +971,37 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
 
         <div className="top-risks">
           <div className="top-risks-title">Risks</div>
+          <FilterBar
+            groups={[
+              { options: ["All", "Critical", "High", "Medium", "Low"], value: riskSeverityFilter, onChange: setRiskSeverityFilter },
+            ]}
+            sort={{ options: Object.keys(AI_RISK_SORT_FIELDS), value: riskSortBy, onChange: setRiskSortBy, dir: riskSortDir, onToggleDir: () => setRiskSortDir(d => d === "asc" ? "desc" : "asc") }}
+            resultCount={filteredRisks.length}
+            totalCount={allRisks.length}
+          />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 60px", gap: 8, padding: "0 0 6px 0", borderBottom: "1px solid #e5e7eb", marginBottom: 4 }}>
             <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af" }}>CVE</span>
             <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af" }}>SEVERITY</span>
             <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textAlign: "right" }}>CVSS</span>
           </div>
-          {allRisks.slice(0, 3).map(r => (
+          {filteredRisks.length === 0 && (
+            <div style={{ padding: "12px 0", fontSize: 12, color: "#9ca3af" }}>No vulnerabilities match your filters.</div>
+          )}
+          {filteredRisks.slice(0, 3).map(r => (
             <div key={r.id} className="risk-row" style={{ display: "grid", gridTemplateColumns: "1fr 120px 60px", gap: 8, alignItems: "center" }} onClick={() => onCveClick(r.id)}>
               <span style={{ }}>{r.id}</span>
               <div><span className={`severity-pill sev-${r.severity.toLowerCase()}`}>{r.severity}</span></div>
               <span style={{ fontSize: 12, color: "#6b7280", textAlign: "right" }}>{r.cvss}</span>
             </div>
           ))}
-          {showAll && allRisks.slice(3).map(r => (
+          {showAll && filteredRisks.slice(3).map(r => (
             <div key={r.id} className="risk-row" style={{ display: "grid", gridTemplateColumns: "1fr 120px 60px", gap: 8, alignItems: "center" }} onClick={() => onCveClick(r.id)}>
               <span style={{ }}>{r.id}</span>
               <div><span className={`severity-pill sev-${r.severity.toLowerCase()}`}>{r.severity}</span></div>
               <span style={{ fontSize: 12, color: "#6b7280", textAlign: "right" }}>{r.cvss}</span>
             </div>
           ))}
-          {allRisks.length > 3 && (
+          {filteredRisks.length > 3 && (
             <div style={{ paddingTop: 10, textAlign: "center" }}>
               <span
                 style={{ fontSize: 13, color: "#2563eb", fontWeight: 600, cursor: "pointer", userSelect: "none" }}
@@ -986,7 +1009,7 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
                 onMouseEnter={e => e.target.style.textDecoration = "underline"}
                 onMouseLeave={e => e.target.style.textDecoration = "none"}
               >
-                {showAll ? "▲ Hide" : `+ ${allRisks.length - 3} more`}
+                {showAll ? "▲ Hide" : `+ ${filteredRisks.length - 3} more`}
               </span>
             </div>
           )}
@@ -1066,16 +1089,143 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
 }
 
 //upload step 3: Select
+// Shared filter bar for pages that list vulnerabilities/tickets. Renders an
+// optional search box plus one or more pill-button groups (severity, status,
+// priority, etc). Kept generic so Select/Validation/GenerateTicket/Review can
+// each pass whatever groups make sense for that page's data shape.
+function FilterBar({ search, onSearchChange, searchPlaceholder = "Search…", groups = [], sort, resultCount, totalCount, searchMinWidth = 200 }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {onSearchChange && (
+          <input
+            value={search}
+            onChange={e => onSearchChange(e.target.value)}
+            placeholder={searchPlaceholder}
+            style={{ padding: "7px 14px", borderRadius: 20, border: "1px solid #e5e7eb", fontSize: 12, fontFamily: "DM Sans, sans-serif", outline: "none", minWidth: searchMinWidth, width: "100%", color: "#374151" }}
+          />
+        )}
+        {groups.map((g, gi) => (
+          <div key={gi} style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            {(gi > 0 || onSearchChange) && <div style={{ width: 1, height: 20, background: "#e5e7eb", margin: "0 2px" }} />}
+            {g.options.map(opt => (
+              <button key={opt} onClick={() => g.onChange(opt)}
+                style={{ padding: "5px 14px", borderRadius: 20, border: "1px solid #e5e7eb", fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "DM Sans, sans-serif",
+                  background: g.value === opt ? "#2563eb" : "#fff", color: g.value === opt ? "#fff" : "#374151" }}>
+                {opt}
+              </button>
+            ))}
+          </div>
+        ))}
+        {sort && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            {(groups.length > 0 || onSearchChange) && <div style={{ width: 1, height: 20, background: "#e5e7eb", margin: "0 2px" }} />}
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", letterSpacing: "0.03em" }}>SORT</span>
+            <select
+              value={sort.value}
+              onChange={e => sort.onChange(e.target.value)}
+              style={{ padding: "5px 10px", borderRadius: 20, border: "1px solid #e5e7eb", fontSize: 12, fontWeight: 500, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none", cursor: "pointer" }}
+            >
+              {sort.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+            </select>
+            {sort.value !== "None" && (
+              <button
+                onClick={sort.onToggleDir}
+                title={sort.dir === "asc" ? "Ascending — click to reverse" : "Descending — click to reverse"}
+                style={{ width: 28, height: 28, borderRadius: "50%", border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "DM Sans, sans-serif" }}
+              >
+                {sort.dir === "asc" ? "↑" : "↓"}
+              </button>
+            )}
+          </div>
+        )}
+        {typeof resultCount === "number" && (
+          <div style={{ fontSize: 12, color: "#9ca3af", marginLeft: "auto" }}>
+            Showing {resultCount} of {totalCount}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Matches a row against a free-text search term across whichever fields are
+// present on that row shape (cve/id, title, asset, description).
+function matchesSearch(row, term) {
+  if (!term.trim()) return true;
+  const t = term.trim().toLowerCase();
+  return [row.id, row.title, row.desc, row.asset]
+    .filter(Boolean)
+    .some(v => String(v).toLowerCase().includes(t));
+}
+
+// Severity/priority don't sort correctly alphabetically (e.g. "Critical"
+// would land before "High" but "Low" would land before both), so give
+// those fields an explicit rank to sort by instead.
+const SEVERITY_RANK = { Critical: 4, High: 3, Medium: 2, Low: 1 };
+const PRIORITY_RANK = { "P1 - Critical": 3, "P1": 3, "P2 - High": 2, "P2": 2, "P3 - Medium": 1, "P3": 1 };
+
+// Generic sort helper shared by Select/Validation/GenerateTicket/Review.
+// `field` is the row key to sort by ("id" | "severity" | "cvss" | ...),
+// `dir` is "asc" | "desc". Pass field === "None" (or falsy) to skip sorting.
+function sortRows(rows, field, dir = "asc") {
+  if (!field || field === "None") return rows;
+  const rank = row => {
+    let v = row[field];
+    if (field === "severity") return SEVERITY_RANK[v] ?? 0;
+    if (field === "priority") return PRIORITY_RANK[v] ?? 0;
+    if (typeof v === "string") return v.toLowerCase();
+    return v ?? 0;
+  };
+  const sorted = [...rows].sort((a, b) => {
+    const av = rank(a), bv = rank(b);
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+    return 0;
+  });
+  return dir === "desc" ? sorted.reverse() : sorted;
+}
+
+// Maps the human-readable sort labels shown in the dropdown to the
+// underlying row field to sort by for that page's data shape.
+const SELECT_SORT_FIELDS = { "None": null, "CVE": "id", "Title": "title", "Severity": "severity", "CVSS": "cvss", "Asset": "asset" };
+
 function SelectStep({ onNext, onBack, selected, setSelected, onCveClick }) {
-  const allChecked = vulnRows.every(r => selected.includes(r.id));
+  const [search, setSearch] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("All");
+  const [sortBy, setSortBy] = useState("None");
+  const [sortDir, setSortDir] = useState("asc");
+
+  const filteredRows = sortRows(
+    vulnRows.filter(row => (severityFilter === "All" || row.severity === severityFilter) && matchesSearch(row, search)),
+    SELECT_SORT_FIELDS[sortBy],
+    sortDir
+  );
+
+  const allChecked = filteredRows.length > 0 && filteredRows.every(r => selected.includes(r.id));
   const toggle = id => setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
-  const toggleAll = () => setSelected(allChecked ? [] : vulnRows.map(r => r.id));
+  // Select/deselect only the rows currently visible under the active
+  // filter, so toggling "all" on a filtered view doesn't blow away
+  // selections the user already made on other rows.
+  const toggleAll = () => {
+    const filteredIds = filteredRows.map(r => r.id);
+    setSelected(s => allChecked ? s.filter(id => !filteredIds.includes(id)) : Array.from(new Set([...s, ...filteredIds])));
+  };
 
   return (
     <>
       <div className="page-card">
         <div className="page-title">Select Vulnerabilities</div>
         <div className="page-sub">Choose which findings to push through validation & ticketing.</div>
+        <FilterBar
+          search={search}
+          onSearchChange={setSearch}
+          searchPlaceholder="Search CVE, title, or asset…"
+          groups={[{ options: ["All", "Critical", "High", "Medium", "Low"], value: severityFilter, onChange: setSeverityFilter }]}
+          sort={{ options: Object.keys(SELECT_SORT_FIELDS), value: sortBy, onChange: setSortBy, dir: sortDir, onToggleDir: () => setSortDir(d => d === "asc" ? "desc" : "asc") }}
+          resultCount={filteredRows.length}
+          totalCount={vulnRows.length}
+        />
         <div style={{ overflowX: "auto" }}>
           <table className="vuln-table">
             <thead>
@@ -1089,7 +1239,7 @@ function SelectStep({ onNext, onBack, selected, setSelected, onCveClick }) {
               </tr>
             </thead>
             <tbody>
-              {vulnRows.map(row => (
+              {filteredRows.map(row => (
                 <tr key={row.id} className={selected.includes(row.id) ? "selected" : ""} onClick={() => toggle(row.id)}>
                   <td><input type="checkbox" className="cb" checked={selected.includes(row.id)} onChange={() => toggle(row.id)} onClick={e => e.stopPropagation()} /></td>
                   <td className="cve-link" onClick={e => { e.stopPropagation(); onCveClick(row.id); }}>{row.id}</td>
@@ -1101,6 +1251,13 @@ function SelectStep({ onNext, onBack, selected, setSelected, onCveClick }) {
                   <td style={{ color: "#6b7280", fontSize: 12 }}>{row.asset}</td>
                 </tr>
               ))}
+              {filteredRows.length === 0 && (
+                <tr>
+                  <td colSpan={6} style={{ textAlign: "center", padding: "24px 0", color: "#9ca3af", fontSize: 13 }}>
+                    No vulnerabilities match your filters.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1111,7 +1268,26 @@ function SelectStep({ onNext, onBack, selected, setSelected, onCveClick }) {
 }
 
 //Upload step 4: Validation
+const VALIDATION_SORT_FIELDS = { "None": null, "CVE": "id", "Severity": "severity", "Status": "status" };
+
 function ValidationStep({ onNext, onBack, selected, onCveClick }) {
+  const [search, setSearch] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [sortBy, setSortBy] = useState("None");
+  const [sortDir, setSortDir] = useState("asc");
+
+  const selectedRows = validationRows.filter(row => selected.includes(row.id));
+  const filteredRows = sortRows(
+    selectedRows.filter(row =>
+      (severityFilter === "All" || row.severity === severityFilter) &&
+      (statusFilter === "All" || row.status === statusFilter) &&
+      matchesSearch(row, search)
+    ),
+    VALIDATION_SORT_FIELDS[sortBy],
+    sortDir
+  );
+
   return (
     <>
       <div className="page-card">
@@ -1129,7 +1305,26 @@ function ValidationStep({ onNext, onBack, selected, onCveClick }) {
         </div>
         <div className="val-desc">For each selected vulnerability we cross-check the AI summary, remediation, severity classification, and flag any potential hallucinations against NVD, MITRE, and vendor advisories.</div>
 
-        {validationRows.filter(row => selected.includes(row.id)).map(row => (
+        <FilterBar
+          search={search}
+          onSearchChange={setSearch}
+          searchPlaceholder="Search CVE or description…"
+          groups={[
+            { options: ["All", "Critical", "High", "Medium", "Low"], value: severityFilter, onChange: setSeverityFilter },
+            { options: ["All", "Validated", "Needs Review"], value: statusFilter, onChange: setStatusFilter },
+          ]}
+          sort={{ options: Object.keys(VALIDATION_SORT_FIELDS), value: sortBy, onChange: setSortBy, dir: sortDir, onToggleDir: () => setSortDir(d => d === "asc" ? "desc" : "asc") }}
+          resultCount={filteredRows.length}
+          totalCount={selectedRows.length}
+        />
+
+        {filteredRows.length === 0 && (
+          <div style={{ textAlign: "center", padding: "24px 0", color: "#9ca3af", fontSize: 13 }}>
+            No vulnerabilities match your filters.
+          </div>
+        )}
+
+        {filteredRows.map(row => (
           <div key={row.id} className="val-row">
             <div className="val-row-top">
               <span className="val-cve" style={{ cursor: "pointer" }} onClick={() => onCveClick(row.id)}>{row.id}</span>
@@ -1159,6 +1354,8 @@ function ValidationStep({ onNext, onBack, selected, onCveClick }) {
 }
 
 //Upload step 5: Generate Ticket
+const TICKET_SORT_FIELDS = { "None": null, "CVE": "id", "Title": "title", "Severity": "severity", "Priority": "priority", "Asset": "asset" };
+
 function GenerateTicketStep({ onNext, onBack, selected }) {
   const tickets = (selected || []).map(id => {
     const d = cveDetails[id] || {};
@@ -1167,6 +1364,7 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
       id,
       title: `[${row.severity || ""}] ${id} — ${d.title || ""}`,
       description: d.why || "",
+      severity: row.severity || "",
       priority: row.severity === "Critical" ? "P1 - Critical" : row.severity === "High" ? "P2 - High" : "P3 - Medium",
       asset: row.asset || "",
       assignTo: row.severity === "Critical" ? "Security Team" : "IT Operations",
@@ -1177,6 +1375,11 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
   const [forms, setForms] = useState(tickets.map(t => ({ ...t })));
   const [submitted, setSubmitted] = useState(tickets.map(() => null));
   const allDone = submitted.every(s => s !== null);
+  const [search, setSearch] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("All");
+  const [reviewFilter, setReviewFilter] = useState("All");
+  const [sortBy, setSortBy] = useState("None");
+  const [sortDir, setSortDir] = useState("asc");
 
   const update = (field, value) => {
     setForms(prev => prev.map((f, i) => i === activeIdx ? { ...f, [field]: value } : f));
@@ -1184,22 +1387,69 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
 
   const form = forms[activeIdx] || {};
 
+  // Filtering/sorting only narrows or reorders which tickets show in the
+  // sidebar — the underlying forms/submitted arrays keep their original
+  // indices so approve/reject state and the active form aren't disturbed.
+  const reviewStatus = i => submitted[i] === "approved" ? "Approved" : submitted[i] === "rejected" ? "Rejected" : "Pending";
+  const visibleIdx = sortRows(
+    forms
+      .map((_, i) => i)
+      .filter(i => {
+        const t = forms[i];
+        return (severityFilter === "All" || t.severity === severityFilter) &&
+          (reviewFilter === "All" || reviewStatus(i) === reviewFilter) &&
+          matchesSearch(t, search);
+      })
+      .map(i => ({ __idx: i, ...forms[i] })),
+    TICKET_SORT_FIELDS[sortBy],
+    sortDir
+  ).map(r => r.__idx);
+
   return (
     <>
-      <div className="page-card" style={{ flexDirection: "row", gap: 0, padding: 0, overflow: "hidden" }}>
+      <div className="page-card" style={{ padding: 0, overflow: "hidden" }}>
+        {/* Header: title only — filter/sort panel below is always visible */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "none" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Tickets to create</div>
+        </div>
+
+        {/* Filter/sort panel — spans the full width of the page, over both
+            the sidebar and the form, same as the Select/Validation pages.
+            Always shown (no toggle) so filters stay accessible at a glance. */}
+        <div style={{ padding: "12px 20px 16px", borderBottom: "1px solid #f3f4f6", background: "#fafafa" }}>
+          <FilterBar
+            search={search}
+            onSearchChange={setSearch}
+            searchPlaceholder="Search CVE, title, or asset…"
+            groups={[
+              { options: ["All", "Critical", "High", "Medium", "Low"], value: severityFilter, onChange: setSeverityFilter },
+              { options: ["All", "Pending", "Approved", "Rejected"], value: reviewFilter, onChange: setReviewFilter },
+            ]}
+            sort={{ options: Object.keys(TICKET_SORT_FIELDS), value: sortBy, onChange: setSortBy, dir: sortDir, onToggleDir: () => setSortDir(d => d === "asc" ? "desc" : "asc") }}
+            resultCount={visibleIdx.length}
+            totalCount={forms.length}
+          />
+        </div>
+
+        <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         {/* Left sidebar */}
-        <div style={{ width: 200, borderRight: "1px solid #f3f4f6", padding: "16px 0", flexShrink: 0, overflowY: "auto" }}>
-          <div style={{ padding: "0 16px 12px", fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Tickets to create</div>
-          {forms.map((t, i) => (
-            <div key={t.id} onClick={() => setActiveIdx(i)}
-              style={{ padding: "10px 16px", cursor: "pointer", background: activeIdx === i ? "#eff6ff" : "transparent",
-                borderLeft: activeIdx === i ? "3px solid #2563eb" : "3px solid transparent" }}>
-              <div style={{ fontSize: 12, fontFamily: "monospace", color: activeIdx === i ? "#2563eb" : "#374151", fontWeight: 600 }}>{t.id}</div>
-              <div style={{ fontSize: 11, marginTop: 2, color: submitted[i] === "approved" ? "#16a34a" : submitted[i] === "rejected" ? "#dc2626" : "#9ca3af" }}>
-                {submitted[i] === "approved" ? "✓ Approved" : submitted[i] === "rejected" ? "✗ Rejected" : t.priority}
+        <div style={{ width: 220, borderRight: "1px solid #f3f4f6", padding: "12px 0", flexShrink: 0, overflowY: "auto" }}>
+          {visibleIdx.length === 0 && (
+            <div style={{ padding: "0 16px", fontSize: 12, color: "#9ca3af" }}>No tickets match your filters.</div>
+          )}
+          {visibleIdx.map(i => {
+            const t = forms[i];
+            return (
+              <div key={t.id} onClick={() => setActiveIdx(i)}
+                style={{ padding: "10px 16px", cursor: "pointer", background: activeIdx === i ? "#eff6ff" : "transparent",
+                  borderLeft: activeIdx === i ? "3px solid #2563eb" : "3px solid transparent" }}>
+                <div style={{ fontSize: 12, fontFamily: "monospace", color: activeIdx === i ? "#2563eb" : "#374151", fontWeight: 600 }}>{t.id}</div>
+                <div style={{ fontSize: 11, marginTop: 2, color: submitted[i] === "approved" ? "#16a34a" : submitted[i] === "rejected" ? "#dc2626" : "#9ca3af" }}>
+                  {submitted[i] === "approved" ? "✓ Approved" : submitted[i] === "rejected" ? "✗ Rejected" : t.priority}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Right form */}
@@ -1282,6 +1532,7 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
             </button>
           </div>
         </div>
+        </div>
       </div>
       <Footer step={4} onBack={onBack} onNext={() => onNext(tickets.filter((_, i) => submitted[i] === "approved").map(t => t.id))} nextLabel="Review & Send" disableNext={!allDone} />
     </>
@@ -1289,6 +1540,8 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
 }
 
 //Upload step 6: Review & Send
+const REVIEW_SORT_FIELDS = { "None": null, "CVE": "id", "Title": "title", "Severity": "severity", "Priority": "priority", "Assign To": "assignTo" };
+
 function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit }) {
   const tickets = (approvedTickets || []).map(id => {
     const d = cveDetails[id] || {};
@@ -1305,7 +1558,21 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
   const [sent, setSent] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState(null);
+  const [search, setSearch] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("All");
+  const [sortBy, setSortBy] = useState("None");
+  const [sortDir, setSortDir] = useState("asc");
   const priorityColor = p => p === "P1" ? { bg: "#fef2f2", color: "#dc2626" } : p === "P2" ? { bg: "#fff7ed", color: "#ea580c" } : { bg: "#f0fdf4", color: "#16a34a" };
+
+  // Filtering/sorting here only narrows or reorders what's shown for review
+  // — "Send to Jira" below always sends every approved ticket in `tickets`,
+  // filtered or not, since the filter is just a way to find something in a
+  // long list, not a second approval step.
+  const filteredTickets = sortRows(
+    tickets.filter(t => (severityFilter === "All" || t.severity === severityFilter) && matchesSearch(t, search)),
+    REVIEW_SORT_FIELDS[sortBy],
+    sortDir
+  );
 
   if (sent) {
     return (
@@ -1327,16 +1594,30 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
         <div style={{ fontSize: 15, fontWeight: 700, color: "#111", marginBottom: 4 }}>Review & Send</div>
         <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 20 }}>Confirm the following tickets will be sent to Jira</div>
 
+        {tickets.length > 0 && (
+          <FilterBar
+            search={search}
+            onSearchChange={setSearch}
+            searchPlaceholder="Search CVE or title…"
+            groups={[{ options: ["All", "Critical", "High", "Medium", "Low"], value: severityFilter, onChange: setSeverityFilter }]}
+            sort={{ options: Object.keys(REVIEW_SORT_FIELDS), value: sortBy, onChange: setSortBy, dir: sortDir, onToggleDir: () => setSortDir(d => d === "asc" ? "desc" : "asc") }}
+            resultCount={filteredTickets.length}
+            totalCount={tickets.length}
+          />
+        )}
+
         <div style={{ border: "1px solid #f3f4f6", borderRadius: 10, overflow: "hidden", marginBottom: 20 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr 1fr", padding: "10px 16px", background: "#f9fafb", borderBottom: "1px solid #f3f4f6" }}>
             {["CVE", "Title", "Priority", "Assign To"].map(h => (
               <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>{h}</div>
             ))}
           </div>
-          {tickets.map((t, i) => {
+          {filteredTickets.length === 0 ? (
+            <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 13, color: "#9ca3af" }}>No tickets match your filters.</div>
+          ) : filteredTickets.map((t, i) => {
             const pc = priorityColor(t.priority);
             return (
-              <div key={t.id} style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr 1fr", padding: "12px 16px", borderBottom: i < tickets.length - 1 ? "1px solid #f3f4f6" : "none", alignItems: "center" }}>
+              <div key={t.id} style={{ display: "grid", gridTemplateColumns: "1fr 2fr 1fr 1fr", padding: "12px 16px", borderBottom: i < filteredTickets.length - 1 ? "1px solid #f3f4f6" : "none", alignItems: "center" }}>
                 <div style={{ fontSize: 12, fontFamily: "monospace", color: "#374151", fontWeight: 600 }}>{t.id}</div>
                 <div style={{ fontSize: 13, color: "#374151" }}>{t.title}</div>
                 <div><span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: pc.bg, color: pc.color }}>{t.priority}</span></div>
@@ -1794,9 +2075,7 @@ function RegistryConnect() {
 }
 
 //Profile
-function Profile({ onSignOut, userName, userEmail }) {
-  const [notifications, setNotifications] = useState(true);
-  const [defaultAssign, setDefaultAssign] = useState("Security Team");
+function Profile({ onSignOut, userName, userEmail, notifications, setNotifications, defaultAssign, setDefaultAssign }) {
 
   return (
     <div className="page-card" style={{ maxWidth: 560, margin: "0 auto", width: "100%" }}>
@@ -2045,6 +2324,37 @@ function ChatWidget() {
   );
 }
 
+// Profile settings (notifications toggle, default assignee) are saved to
+// localStorage per-account, keyed by email, so they survive tab switches,
+// sign-out/sign-in, and page reloads — not just held in memory.
+const PROFILE_PREFS_PREFIX = "vulnwiz-profile-prefs:";
+const DEFAULT_PROFILE_PREFS = { notifications: true, defaultAssign: "Security Team" };
+
+function loadProfilePrefs(email) {
+  if (!email) return DEFAULT_PROFILE_PREFS;
+  try {
+    const raw = localStorage.getItem(PROFILE_PREFS_PREFIX + email);
+    if (!raw) return DEFAULT_PROFILE_PREFS;
+    const parsed = JSON.parse(raw);
+    return {
+      notifications: typeof parsed.notifications === "boolean" ? parsed.notifications : DEFAULT_PROFILE_PREFS.notifications,
+      defaultAssign: typeof parsed.defaultAssign === "string" ? parsed.defaultAssign : DEFAULT_PROFILE_PREFS.defaultAssign,
+    };
+  } catch {
+    return DEFAULT_PROFILE_PREFS;
+  }
+}
+
+function saveProfilePrefs(email, prefs) {
+  if (!email) return;
+  try {
+    localStorage.setItem(PROFILE_PREFS_PREFIX + email, JSON.stringify(prefs));
+  } catch {
+    // localStorage unavailable (e.g. private browsing) — fail silently,
+    // prefs just won't persist across reloads this session.
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [uploadStep, setUploadStep] = useState(0);
@@ -2059,6 +2369,15 @@ export default function App() {
   const [accounts, setAccounts] = useState([]);
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
+  const [notifications, setNotifications] = useState(DEFAULT_PROFILE_PREFS.notifications);
+  const [defaultAssign, setDefaultAssign] = useState(DEFAULT_PROFILE_PREFS.defaultAssign);
+
+  // Whenever the signed-in user changes their profile prefs, persist them
+  // under that user's own key so they're there next time they sign in.
+  useEffect(() => {
+    if (!authed || !userEmail) return;
+    saveProfilePrefs(userEmail, { notifications, defaultAssign });
+  }, [notifications, defaultAssign, authed, userEmail]);
 
   const goToTab = tab => { setActiveTab(tab); setUploadStep(0); setCveId(null); setUploadedFile(null); };
 
@@ -2101,7 +2420,7 @@ export default function App() {
         <style>{css}</style>
         <div className="shell">
           {authScreen === "signin"
-            ? <SignIn onSignIn={(email, password) => { const account = accounts.find(a => a.email === email && a.password === password); if (account) { setUserName(account.name); setUserEmail(email); setAuthed(true); } }} onGoSignUp={() => setAuthScreen("signup")} accounts={accounts} />
+            ? <SignIn onSignIn={(email, password) => { const account = accounts.find(a => a.email === email && a.password === password); if (account) { setUserName(account.name); setUserEmail(email); setAuthed(true); const prefs = loadProfilePrefs(email); setNotifications(prefs.notifications); setDefaultAssign(prefs.defaultAssign); } }} onGoSignUp={() => setAuthScreen("signup")} accounts={accounts} />
             : <SignUp onSignUp={(name, email, password) => { setAccounts(prev => [...prev, { name, email, password }]); setUserName(name); setUserEmail(email); setAuthScreen("signin"); }} onGoSignIn={() => setAuthScreen("signin")} accounts={accounts} />
           }
         </div>
@@ -2122,7 +2441,17 @@ export default function App() {
         {activeTab === "dashboard" && <Dashboard />}
         {activeTab === "upload-scan" && renderUploadContent()}
         {activeTab === "tickets" && <TicketList tickets={liveTickets} />}
-        {activeTab === "profile" && <Profile onSignOut={() => { resetSession(); setAuthed(false); setAuthScreen("signin"); setUserName(""); setUserEmail(""); }} userName={userName} userEmail={userEmail} />}
+        {activeTab === "profile" && (
+          <Profile
+            onSignOut={() => { resetSession(); setAuthed(false); setAuthScreen("signin"); setUserName(""); setUserEmail(""); }}
+            userName={userName}
+            userEmail={userEmail}
+            notifications={notifications}
+            setNotifications={setNotifications}
+            defaultAssign={defaultAssign}
+            setDefaultAssign={setDefaultAssign}
+          />
+        )}
 
         <ChatWidget />
       </div>
