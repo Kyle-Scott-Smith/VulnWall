@@ -628,6 +628,15 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
   const [target, setTarget] = useState("");
   const [trivyScanType, setTrivyScanType] = useState("image");
   const [trivyRunMode, setTrivyRunMode] = useState("local");
+  const [usePrivateRegistry, setUsePrivateRegistry] = useState(false);
+  const [registryStatus, setRegistryStatus] = useState({ connected: false });
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/registry/status`, { credentials: "include" })
+      .then(res => res.json())
+      .then(setRegistryStatus)
+      .catch(() => setRegistryStatus({ connected: false }));
+  }, []);
   // liveStatus: idle | scanning | success | error
   const [liveStatus, setLiveStatus] = useState("idle");
   const [liveError, setLiveError] = useState("");
@@ -654,9 +663,11 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
       if (scannerName === "trivy") {
         body.scan_type = trivyScanType;
         body.mode = trivyRunMode;
+        if (usePrivateRegistry) body.usePrivateRegistry = true;
       }
       const res = await fetch(`${API_BASE}/api/scan`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
@@ -793,7 +804,13 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
                 value={target}
                 onChange={e => setTarget(e.target.value)}
                 disabled={liveStatus === "scanning"}
-                placeholder={scannerName === "tenable" ? "e.g. 42" : "e.g. myapp:latest"}
+                placeholder={
+                  scannerName === "tenable"
+                    ? "e.g. 42"
+                    : usePrivateRegistry && registryStatus.url
+                      ? `e.g. ${registryStatus.url}/team/app:latest`
+                      : "e.g. myapp:latest"
+                }
               />
             </div>
 
@@ -814,6 +831,23 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
                     <option value="docker">Docker (aquasec/trivy)</option>
                   </select>
                 </div>
+              </div>
+            )}
+
+            {scannerName === "trivy" && trivyScanType === "image" && registryStatus.connected && (
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#374151" }}>
+                <input
+                  type="checkbox"
+                  checked={usePrivateRegistry}
+                  onChange={e => setUsePrivateRegistry(e.target.checked)}
+                  disabled={liveStatus === "scanning"}
+                />
+                Scan a private image from {registryStatus.url} (connected in your Profile)
+              </label>
+            )}
+            {scannerName === "trivy" && trivyScanType === "image" && !registryStatus.connected && (
+              <div style={{ fontSize: 12, color: "#9ca3af" }}>
+                No private registry connected — go to Profile to connect one if you need to scan a private image.
               </div>
             )}
 
@@ -1630,6 +1664,111 @@ function JiraConnect() {
   );
 }
 
+//Private registry connect — isolated component, only talks to
+// /api/registry/* endpoints. Same shape as JiraConnect: lets the user type
+// in credentials for one private registry (Docker Hub private repo, GHCR,
+// self-hosted Harbor/registry:2, etc.) and stores them server-side against
+// this browser session, instead of needing backend/.env edited + the
+// container restarted.
+function RegistryConnect() {
+  const [status, setStatus] = useState({ loading: true });
+  const [form, setForm] = useState({ url: "", username: "", password: "" });
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState("");
+
+  const refreshStatus = () => {
+    fetch(`${API_BASE}/api/registry/status`, { credentials: "include" })
+      .then(res => res.json())
+      .then(data => setStatus({ loading: false, ...data }))
+      .catch(() => setStatus({ loading: false, connected: false, error: true }));
+  };
+
+  useEffect(() => { refreshStatus(); }, []);
+
+  const handleConnect = async () => {
+    if (!form.url.trim() || !form.username.trim() || !form.password) return;
+    setConnecting(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/registry/connect`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: form.url.trim(), username: form.username.trim(), password: form.password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Couldn't connect");
+      setForm({ url: "", username: "", password: "" });
+      refreshStatus();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnect = () => {
+    fetch(`${API_BASE}/api/registry/disconnect`, { method: "POST", credentials: "include" })
+      .then(refreshStatus);
+  };
+
+  if (status.loading) return null;
+
+  if (status.connected) {
+    return (
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f0fdf4", borderRadius: 10, border: "1px solid #bbf7d0" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#15803d" }}>✓ Connected to private registry</div>
+          <div style={{ fontSize: 12, color: "#166534" }}>{status.url} ({status.username})</div>
+        </div>
+        <button
+          onClick={handleDisconnect}
+          style={{ padding: "8px 14px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
+          Disconnect
+        </button>
+      </div>
+    );
+  }
+
+  const fieldStyle = { padding: "8px 10px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, width: "100%", fontFamily: "DM Sans, sans-serif" };
+
+  return (
+    <div style={{ padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Private registry (Trivy)</div>
+      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>Scan private images by connecting one registry here — no server config needed.</div>
+      <input
+        style={fieldStyle}
+        placeholder="Registry host, e.g. ghcr.io"
+        value={form.url}
+        onChange={e => setForm(f => ({ ...f, url: e.target.value }))}
+        disabled={connecting}
+      />
+      <input
+        style={fieldStyle}
+        placeholder="Username"
+        value={form.username}
+        onChange={e => setForm(f => ({ ...f, username: e.target.value }))}
+        disabled={connecting}
+      />
+      <input
+        style={fieldStyle}
+        type="password"
+        placeholder="Password or access token"
+        value={form.password}
+        onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+        disabled={connecting}
+      />
+      {error && <div style={{ fontSize: 12, color: "#dc2626" }}>{error}</div>}
+      <button
+        onClick={handleConnect}
+        disabled={connecting || !form.url.trim() || !form.username.trim() || !form.password}
+        style={{ alignSelf: "flex-start", padding: "8px 14px", borderRadius: 20, border: "none", background: (connecting || !form.url.trim() || !form.username.trim() || !form.password) ? "#93c5fd" : "#2563eb", color: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+        {connecting ? "Connecting…" : "Connect registry"}
+      </button>
+    </div>
+  );
+}
+
 //Profile
 function Profile({ onSignOut, userName, userEmail }) {
   const [notifications, setNotifications] = useState(true);
@@ -1704,7 +1843,10 @@ function Profile({ onSignOut, userName, userEmail }) {
 
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Integrations</div>
-        <JiraConnect />
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <JiraConnect />
+          <RegistryConnect />
+        </div>
       </div>
 
       <button

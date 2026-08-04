@@ -36,6 +36,8 @@ services:
       # between these two services. Override in backend/.env if you're
       # pointing at an Ollama instance running elsewhere.
       - OLLAMA_HOST=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+
     # Loads backend/.env (copy backend/.env.example -> backend/.env and
     # fill in real values) so TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY /
     # JIRA_CLIENT_ID / JIRA_CLIENT_SECRET / OLLAMA_MODEL / etc. all

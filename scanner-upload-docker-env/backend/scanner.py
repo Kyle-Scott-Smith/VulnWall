@@ -12,6 +12,7 @@ from chatbot import ScanChatbot
 from scanners.registry import SCANNERS, detect_scanner, get_scanner
 from scanners.utils import dedupe_by_cve, sort_by_severity
 from jira_integration import jira_bp
+from registry_credentials import registry_bp, get_credentials as get_registry_credentials
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +31,7 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 CORS(app, supports_credentials=True)
 
 app.register_blueprint(jira_bp)
+app.register_blueprint(registry_bp)
 
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB safety limit for uploaded scan files
 
@@ -183,7 +185,20 @@ def trigger_scan():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    extra_kwargs = {k: v for k, v in body.items() if k not in ("scanner", "target")}
+    extra_kwargs = {k: v for k, v in body.items() if k not in ("scanner", "target", "usePrivateRegistry")}
+
+    # "usePrivateRegistry" is a plain bool from the frontend — never actual
+    # credentials. The real username/password come from whatever the user
+    # connected via the Profile page's "Connect registry" form (see
+    # registry_credentials.py), looked up here by browser session so
+    # nothing sensitive travels in this request body.
+    if scanner_name == "trivy" and body.get("usePrivateRegistry"):
+        reg_url, reg_username, reg_password = get_registry_credentials()
+        if not reg_url:
+            return jsonify({"error": "No private registry connected. Connect one from the Profile page first."}), 400
+        extra_kwargs["registry_url"] = reg_url
+        extra_kwargs["registry_username"] = reg_username
+        extra_kwargs["registry_password"] = reg_password
 
     try:
         raw = scanner.run(target, **extra_kwargs)
