@@ -106,6 +106,8 @@ production WSGI server (e.g. gunicorn) before deploying it for real.
 ```
 .
 ├── docker-compose.yml
+├── README-jira-integration.md
+├── README-ollama-swap.md
 ├── frontend/
 │   ├── Dockerfile
 │   ├── .dockerignore
@@ -118,6 +120,13 @@ production WSGI server (e.g. gunicorn) before deploying it for real.
 └── backend/
     ├── Dockerfile
     ├── .dockerignore
+    ├── .env.example
     ├── requirements.txt
-    └── scanner.py         # Flask API: /api/health, /api/upload-scan
+    ├── scanner.py         # Flask API: /api/health, /api/scanners, /api/upload-scan, /api/scan, /api/analyze, /api/chat
+    ├── ollama_client.py   # local Ollama HTTP client — see README-ollama-swap.md
+    ├── ai_analysis.py     # AI vulnerability analysis (Ollama-backed)
+    ├── chatbot.py         # scan-scoped chatbot (Ollama-backed)
+    ├── tenable_client.py  # Tenable.io CVE cross-reference lookup
+    ├── jira_integration.py
+    └── scanners/          # pluggable scan-source parsers (trivy, tenable, ...)
 ```

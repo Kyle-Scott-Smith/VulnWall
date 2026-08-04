@@ -6,7 +6,7 @@ import os
 import secrets
 
 import tenable_client
-from ai_analysis import ClaudeVulnerabilityAnalyzer
+from ai_analysis import OllamaVulnerabilityAnalyzer
 from chatbot import ScanChatbot
 
 from scanners.registry import SCANNERS, detect_scanner, get_scanner
@@ -33,10 +33,10 @@ app.register_blueprint(jira_bp)
 
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB safety limit for uploaded scan files
 
-# Built lazily on first use rather than at import time, so the app still
-# starts (upload-scan / live-scan keep working) even if ANTHROPIC_API_KEY
-# isn't set yet - /api/analyze and /api/chat just return a clear 503 instead
-# of crashing the whole backend.
+# Built lazily on first use rather than at import time. Ollama needs no
+# API key, but the server might not be running yet — /api/analyze and
+# /api/chat catch that per-request and return a clear error instead of
+# crashing the whole backend.
 _analyzer = None
 _chatbot = None
 
@@ -44,7 +44,7 @@ _chatbot = None
 def _get_analyzer():
     global _analyzer
     if _analyzer is None:
-        _analyzer = ClaudeVulnerabilityAnalyzer()
+        _analyzer = OllamaVulnerabilityAnalyzer()
     return _analyzer
 
 
@@ -88,6 +88,29 @@ def _finalize(vulnerabilities):
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/ollama-status", methods=["GET"])
+def ollama_status():
+    """
+    Diagnostic endpoint: what model will /api/analyze and /api/chat
+    actually use right now, and what's available on the Ollama server.
+    Useful for exactly the kind of "model not found" confusion this had
+    before — check this instead of guessing at a model name.
+    """
+    import ollama_client
+    requested = ollama_client.OLLAMA_MODEL
+    try:
+        models = ollama_client.list_models()
+        resolved = ollama_client.resolve_model(requested)
+        return jsonify({
+            "ollama_host": ollama_client.OLLAMA_HOST,
+            "requested_model": requested,
+            "resolved_model": resolved,
+            "available_models": [m.get("name") or m.get("model") for m in models],
+        })
+    except ollama_client.OllamaError as e:
+        return jsonify({"ollama_host": ollama_client.OLLAMA_HOST, "requested_model": requested, "error": str(e)}), 503
 
 
 @app.route("/api/scanners", methods=["GET"])

@@ -1,7 +1,7 @@
 """
-AI analysis service — calls Claude to turn a normalized vulnerability
-(shape produced by scanner.py's normalize_vulnerability / normalize_tenable_finding)
-into the fields the frontend already renders in CveDetailStep:
+AI analysis service — calls a local Ollama model to turn a normalized
+vulnerability (shape produced by scanners/*.py) into the fields the
+frontend already renders in CveDetailStep:
 
     confidence (int 0-100), why (str), fixes (list[str])
 
@@ -12,18 +12,20 @@ Design mirrors the capstone's LLM-integration notes: grounded prompt
 (never rely on the model's training memory for CVE facts), strict JSON
 contract, retry with a simplified prompt on malformed output, template
 fallback if both attempts fail, and a cache keyed by CVE ID so re-running
-the same scan doesn't re-spend tokens on unchanged findings.
+the same scan doesn't re-spend tokens/compute on unchanged findings.
+
+Previously called the Claude API — swapped to a local Ollama model. The
+class does the same job so scanner.py's usage didn't need to change beyond
+the import name; see ollama_client.py for the actual HTTP call.
 """
 import json
 import logging
 import os
 
-import anthropic
+from ollama_client import chat as ollama_chat, OllamaError
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "1024"))
 MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "2"))
 
 SYSTEM_PROMPT = """You are a cybersecurity analyst assisting with vulnerability triage.
@@ -47,17 +49,24 @@ No other text."""
 _REQUIRED_FIELDS = {"why": str, "fixes": list, "confidence": int, "priority_tier": str}
 
 
-class ClaudeVulnerabilityAnalyzer:
-    def __init__(self, api_key: str = None):
-        api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise EnvironmentError("ANTHROPIC_API_KEY is not set")
-        self.client = anthropic.Anthropic(api_key=api_key)
+class OllamaVulnerabilityAnalyzer:
+    """Renamed from ClaudeVulnerabilityAnalyzer — same interface (.analyze()),
+    same return shape, now backed by a local Ollama model instead of the
+    Claude API. Update imports elsewhere in the codebase if you see the old
+    name."""
+
+    def __init__(self, model: str = None):
+        # No API key needed for a local Ollama instance — model/host are
+        # read from OLLAMA_MODEL / OLLAMA_HOST (see ollama_client.py).
+        # Errors surface per-call instead (server not running, model not
+        # pulled, etc.) so a misconfigured Ollama doesn't crash the app at
+        # import/construction time.
+        self.model = model
         self._cache = {}
 
     def _build_user_prompt(self, vuln: dict) -> str:
         """Grounded context only — CVE facts, no real hostnames (asset field
-        here is already whatever normalize_vulnerability produced, which for
+        here is already whatever the scanner's parse() produced, which for
         Trivy uploads is the scan target string, not a live hostname)."""
         lines = [
             f"CVE ID: {vuln.get('cve') or 'N/A (no CVE mapped, use title/description)'}",
@@ -70,19 +79,19 @@ class ClaudeVulnerabilityAnalyzer:
             lines.append(f"Affected package: {vuln['package']} (installed: {vuln.get('installedVersion', 'unknown')})")
         return "\n".join(lines)
 
-    def _call_claude(self, system_prompt: str, user_prompt: str):
+    def _call_ollama(self, system_prompt: str, user_prompt: str):
         try:
-            response = self.client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=CLAUDE_MAX_TOKENS,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
+            text = ollama_chat(
+                system_prompt,
+                [{"role": "user", "content": user_prompt}],
+                model=self.model,
+                json_mode=True,
             )
-        except anthropic.APIError as e:
-            logger.error("Claude API error: %s", e)
+        except OllamaError as e:
+            logger.error("Ollama error: %s", e)
             return None
 
-        text = "".join(block.text for block in response.content if block.type == "text").strip()
+        text = text.strip()
         if text.startswith("```"):
             text = text.strip("`")
             if text.lower().startswith("json"):
@@ -91,12 +100,12 @@ class ClaudeVulnerabilityAnalyzer:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            logger.warning("Claude response was not valid JSON: %s", text[:200])
+            logger.warning("Ollama response was not valid JSON: %s", text[:200])
             return None
 
         for field, expected_type in _REQUIRED_FIELDS.items():
             if field not in parsed or not isinstance(parsed[field], expected_type):
-                logger.warning("Claude response missing/invalid field: %s", field)
+                logger.warning("Ollama response missing/invalid field: %s", field)
                 return None
         if parsed["priority_tier"] not in ("P1", "P2", "P3", "P4"):
             return None
@@ -120,13 +129,13 @@ class ClaudeVulnerabilityAnalyzer:
         parsed = None
 
         for attempt in range(MAX_RETRIES + 1):
-            parsed = self._call_claude(SYSTEM_PROMPT, user_prompt)
+            parsed = self._call_ollama(SYSTEM_PROMPT, user_prompt)
             if parsed is not None:
                 break
             logger.info("Retry %d/%d for %s", attempt + 1, MAX_RETRIES, cache_key)
 
         if parsed is None:
-            parsed = self._call_claude(_SIMPLIFIED_SYSTEM_PROMPT, user_prompt)
+            parsed = self._call_ollama(_SIMPLIFIED_SYSTEM_PROMPT, user_prompt)
 
         if parsed is None:
             logger.warning("LLM analysis failed for %s — using template fallback", cache_key)
@@ -148,3 +157,8 @@ class ClaudeVulnerabilityAnalyzer:
         if cache_key:
             self._cache[cache_key] = result
         return result
+
+
+# Backwards-compatible alias in case anything else still imports the old
+# name — prefer OllamaVulnerabilityAnalyzer in new code.
+ClaudeVulnerabilityAnalyzer = OllamaVulnerabilityAnalyzer

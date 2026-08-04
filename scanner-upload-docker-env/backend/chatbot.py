@@ -7,17 +7,18 @@ Grounded the same way as ai_analysis.py: the full current finding list is
 included in every call as context, and the model is told not to reference
 anything outside it. This is deliberately NOT a general security assistant —
 it only knows what's in the scan you hand it.
+
+Previously called the Claude API — swapped to a local Ollama model via
+ollama_client.py. Interface (.ask()) is unchanged.
 """
 import logging
 import os
 
-import anthropic
+from ollama_client import chat as ollama_chat
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "600"))
-MAX_CONTEXT_VULNS = int(os.getenv("CHAT_MAX_CONTEXT_VULNS", "300"))  # cap prompt size for very large scans
+CHAT_MAX_CONTEXT_VULNS = int(os.getenv("CHAT_MAX_CONTEXT_VULNS", "300"))  # cap prompt size for very large scans
 MAX_HISTORY_TURNS = 6
 
 SYSTEM_PROMPT_TEMPLATE = """You are a security analyst assistant embedded in a vulnerability scanning dashboard.
@@ -36,25 +37,24 @@ Current scan data ({count} findings):
 
 
 class ScanChatbot:
-    def __init__(self, api_key: str = None):
-        api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise EnvironmentError("ANTHROPIC_API_KEY is not set")
-        self.client = anthropic.Anthropic(api_key=api_key)
+    def __init__(self, model: str = None):
+        # No API key needed for a local Ollama instance — see ollama_client.py
+        # for OLLAMA_HOST / OLLAMA_MODEL configuration.
+        self.model = model
 
     @staticmethod
     def _build_context(vulnerabilities: list) -> str:
         lines = []
-        for v in vulnerabilities[:MAX_CONTEXT_VULNS]:
+        for v in vulnerabilities[:CHAT_MAX_CONTEXT_VULNS]:
             cve = v.get("cve") or v.get("title") or "Unknown"
             lines.append(
                 f"- {cve} | title={v.get('title', '')} | severity={v.get('severity', 'Unknown')} | "
                 f"cvss={v.get('cvss', 'unknown')} | asset={v.get('asset', 'unknown')} | "
                 f"package={v.get('package', 'n/a')}"
             )
-        if len(vulnerabilities) > MAX_CONTEXT_VULNS:
+        if len(vulnerabilities) > CHAT_MAX_CONTEXT_VULNS:
             lines.append(
-                f"... and {len(vulnerabilities) - MAX_CONTEXT_VULNS} more findings not shown "
+                f"... and {len(vulnerabilities) - CHAT_MAX_CONTEXT_VULNS} more findings not shown "
                 f"(truncated for prompt size)."
             )
         return "\n".join(lines) if lines else "(no findings in this scan)"
@@ -65,6 +65,10 @@ class ScanChatbot:
         vulnerabilities: the current scan's normalized findings (same shape
             used everywhere else in this app)
         history: optional prior turns, [{"role": "user"|"assistant", "content": "..."}]
+
+        Raises OllamaError on failure (e.g. server unreachable, model not
+        pulled) — scanner.py's /api/chat route catches this and returns a
+        502 with the message, same as it did for Claude API errors before.
         """
         context = self._build_context(vulnerabilities or [])
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(count=len(vulnerabilities or []), context=context)
@@ -77,10 +81,4 @@ class ScanChatbot:
                 messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": question})
 
-        response = self.client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=CHAT_MAX_TOKENS,
-            system=system_prompt,
-            messages=messages,
-        )
-        return "".join(block.text for block in response.content if block.type == "text").strip()
+        return ollama_chat(system_prompt, messages, model=self.model)
