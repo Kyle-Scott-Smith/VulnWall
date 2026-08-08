@@ -1,0 +1,105 @@
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      # Mount the whole frontend folder so any edits (new components, new
+      # pages, new files anywhere under src/) show up immediately without
+      # a rebuild. This is the key to keeping the environment generic.
+      - ./frontend:/app
+      # But keep node_modules INSIDE the container's own filesystem, not
+      # overwritten by your host folder (which likely has none, or a
+      # different OS's binaries). This anonymous volume "wins" over the
+      # bind mount above for that one subfolder.
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    stdin_open: true
+    tty: true
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    volumes:
+      # Same live-editing trick as the frontend: bind-mount the backend
+      # folder so editing scanner.py (or adding new .py files) is picked
+      # up by Flask's debug-mode reloader without a rebuild.
+      - ./backend:/app
+    environment:
+      - FLASK_DEBUG=1
+      # Ollama lives in its own container on this compose network — "ollama"
+      # resolves via Docker's internal DNS, no localhost/port-mapping needed
+      # between these two services. Override in backend/.env if you're
+      # pointing at an Ollama instance running elsewhere.
+      - OLLAMA_HOST=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+
+    # Loads backend/.env (copy backend/.env.example -> backend/.env and
+    # fill in real values) so TENABLE_ACCESS_KEY / TENABLE_SECRET_KEY /
+    # JIRA_CLIENT_ID / JIRA_CLIENT_SECRET / OLLAMA_MODEL / etc. all
+    # actually reach the container. Compose won't error if the file is
+    # missing, but the Tenable/AI/Jira features will each report
+    # "not configured" (or fail per-request, for Ollama) until it exists.
+    env_file:
+      - ./backend/.env
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      # Exposed to the host too, so you can run `ollama pull <model>` from
+      # outside the container, or point other local tools at it.
+      - "11434:11434"
+    volumes:
+      # Persists downloaded models across `docker compose down` — without
+      # this, every restart re-pulls the model from scratch.
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # GPU acceleration (optional): uncomment if you have an NVIDIA GPU and
+    # the NVIDIA Container Toolkit installed. CPU-only works fine for small
+    # models, just slower.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # Pulls the model automatically on `docker compose up` instead of relying
+  # on a manual `docker compose exec ollama ollama pull ...` step — that
+  # manual step is exactly what went wrong before: easy to run once, get a
+  # different/default model, and never notice the name doesn't match what
+  # OLLAMA_MODEL in backend/.env actually says. This container pulls ONE
+  # hardcoded model (llama3.1, matching OLLAMA_MODEL's default in
+  # backend/.env.example) against the SAME Ollama server the backend talks
+  # to, then exits successfully — `backend` won't start until this finishes.
+  #
+  # If you change OLLAMA_MODEL to something else later, update the model
+  # name below to match (both places, kept in sync manually and
+  # intentionally — see README-ollama-swap.md for why).
+  ollama-pull:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh", "-c", "ollama pull llama3.1 && echo 'llama3.1 pulled successfully'"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  ollama_models:
