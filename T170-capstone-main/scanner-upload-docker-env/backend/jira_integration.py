@@ -15,11 +15,11 @@ Why isolated like this (safe to push to git):
     503/"not configured" response instead of crashing the app on import.
     You can commit this file and run the rest of the app fine without
     ever configuring Jira.
-  - Token storage is a single in-memory dict for demo purposes (see
-    _TOKENS below.) Swap it for a real database before using this with
-    more than one concurrent demo user — that's the one thing this file
-    deliberately does NOT solve, flagged clearly so it isn't mistaken
-    for production-ready auth storage.
+  - Token storage lives in the same SQLite database as accounts (see
+    init_jira_db() below), keyed by user_id, so a connection persists
+    across restarts the same way the account itself does. Tokens are
+    stored in plain text in that database file — fine for a local
+    dev/demo tool, not something to expose beyond localhost as-is.
 
 Endpoints registered by this blueprint (mounted at /api/jira):
   GET  /api/jira/status              -> is a Jira account currently connected?
@@ -34,9 +34,12 @@ Endpoints registered by this blueprint (mounted at /api/jira):
 
 import os
 import secrets
+from datetime import datetime, timezone
 
 import requests
 from flask import Blueprint, jsonify, redirect, request, session
+
+from auth import _get_db
 
 jira_bp = Blueprint("jira", __name__, url_prefix="/api/jira")
 
@@ -65,19 +68,63 @@ AUTHORIZE_URL = "https://auth.atlassian.com/authorize"
 TOKEN_URL = "https://auth.atlassian.com/oauth/token"
 ACCESSIBLE_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources"
 
-# --- Token storage (DEMO ONLY — see module docstring) -------------------
-# Keyed by Flask session id so multiple browser sessions don't clobber
-# each other during a demo. Not persisted, not encrypted, gone on
-# process restart. Replace with a real database + encryption before any
-# real multi-user use.
-_TOKENS = {}
+# --- Token storage -------------------------------------------------------
+# Same SQLite database as auth.py, one row per user in a jira_connections
+# table, keyed by users.id. This used to be a plain in-memory dict, which
+# meant a connection vanished on every `docker compose up --build` even
+# though the account itself (in SQLite) survived the restart — moving
+# this into the same database fixes that mismatch. Tokens are stored in
+# plain text in this SQLite file (not encrypted) — fine for a local
+# dev/demo tool, not something to expose beyond localhost as-is.
+
+
+def init_jira_db():
+    """Creates the jira_connections table if it doesn't exist yet. Called
+    once at import time (see bottom of file), same as auth.init_db()."""
+    conn = _get_db()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jira_connections (
+                user_id        INTEGER PRIMARY KEY REFERENCES users(id),
+                access_token   TEXT NOT NULL,
+                refresh_token  TEXT,
+                cloud_id       TEXT NOT NULL,
+                site_name      TEXT NOT NULL,
+                account_id     TEXT,
+                created_at     TEXT NOT NULL,
+                updated_at     TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _session_key():
-    # Flask's session cookie already gives each browser a stable id once
-    # something is written to session; force that to exist.
-    session.setdefault("_jira_sid", secrets.token_urlsafe(16))
-    return session["_jira_sid"]
+    """Returns the logged-in account's user_id (set by auth.py on
+    signup/login), or None if nobody's signed in. Tokens are keyed by this
+    instead of a random per-browser session id, so a Jira connection
+    follows the account rather than disappearing when the session cookie
+    changes."""
+    return session.get("user_id")
+
+
+def _get_record(user_id):
+    """Returns the jira_connections row for user_id as a plain dict (so
+    .get() works the same way it did on the old in-memory dict), or None
+    if not connected / not signed in."""
+    if not user_id:
+        return None
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM jira_connections WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
 
 
 def _not_configured():
@@ -95,7 +142,7 @@ def status():
     if not CLIENT_ID or not CLIENT_SECRET:
         return jsonify({"configured": False, "connected": False})
 
-    record = _TOKENS.get(_session_key())
+    record = _get_record(_session_key())
     if not record:
         return jsonify({"configured": True, "connected": False})
 
@@ -113,6 +160,8 @@ def connect():
     error = _not_configured()
     if error:
         return error
+    if not _session_key():
+        return jsonify({"error": "You must be signed in to connect Jira"}), 401
 
     state = secrets.token_urlsafe(24)
     session["jira_oauth_state"] = state
@@ -136,6 +185,8 @@ def callback():
     error = _not_configured()
     if error:
         return error
+    if not _session_key():
+        return jsonify({"error": "You must be signed in to connect Jira"}), 401
 
     returned_state = request.args.get("state")
     expected_state = session.pop("jira_oauth_state", None)
@@ -194,13 +245,31 @@ def callback():
         # to this, instead of silently defaulting to None.
         print(f"[jira_integration] /myself lookup failed ({myself_resp.status_code}): {myself_resp.text}")
 
-    _TOKENS[_session_key()] = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "cloud_id": site["id"],
-        "site_name": site["name"],
-        "account_id": account_id,
-    }
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO jira_connections (
+                user_id, access_token, refresh_token, cloud_id, site_name,
+                account_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                access_token=excluded.access_token,
+                refresh_token=excluded.refresh_token,
+                cloud_id=excluded.cloud_id,
+                site_name=excluded.site_name,
+                account_id=excluded.account_id,
+                updated_at=excluded.updated_at
+            """,
+            (
+                _session_key(), access_token, refresh_token, site["id"], site["name"],
+                account_id, now, now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     # Send the user back into the app's UI (Profile screen) rather than
     # showing a bare API response.
@@ -209,7 +278,14 @@ def callback():
 
 @jira_bp.route("/disconnect", methods=["POST"])
 def disconnect():
-    _TOKENS.pop(_session_key(), None)
+    user_id = _session_key()
+    if user_id:
+        conn = _get_db()
+        try:
+            conn.execute("DELETE FROM jira_connections WHERE user_id = ?", (user_id,))
+            conn.commit()
+        finally:
+            conn.close()
     return jsonify({"status": "disconnected"})
 
 
@@ -317,7 +393,7 @@ def create_ticket():
     if error:
         return error
 
-    record = _TOKENS.get(_session_key())
+    record = _get_record(_session_key())
     if not record:
         return jsonify({"error": "No Jira account connected. Connect one first."}), 401
 
@@ -378,3 +454,6 @@ def create_ticket():
         "issueKey": issue_key,
         "url": f"https://{record['site_name']}.atlassian.net/browse/{issue_key}" if issue_key else None,
     })
+
+
+init_jira_db()

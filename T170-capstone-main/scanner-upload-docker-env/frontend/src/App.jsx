@@ -1990,6 +1990,23 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
                   fixes: cveDetails[t.id]?.fixes || [],
                   why: cveDetails[t.id]?.why || "",
                 }));
+
+                // Persist to the signed-in account (see tickets.py) so
+                // these survive a refresh/restart instead of only living
+                // in this tab's React state. Best-effort — a save failure
+                // here shouldn't block the wizard, same reasoning as the
+                // Jira push above.
+                try {
+                  await fetch(`${API_BASE}/api/tickets`, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(newTickets),
+                  });
+                } catch {
+                  // local ticket list below still gets these either way
+                }
+
                 onSubmit(newTickets);
                 setSending(false);
                 setSent(true);
@@ -2185,6 +2202,15 @@ function TicketList({ tickets: initialTickets }) {
                     setTickets(prev => prev.map(t => t.id === updated.id ? updated : t));
                     setSelectedTicket(updated);
                     setEditing(false);
+                    // Best-effort — the local update above already reflects
+                    // the change either way, this just makes it stick past
+                    // a refresh.
+                    fetch(`${API_BASE}/api/tickets/${encodeURIComponent(updated.id)}`, {
+                      method: "PATCH",
+                      credentials: "include",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ status: editForm.status, assigned: editForm.assigned }),
+                    }).catch(() => {});
                   }}
                   style={{ flex: 1, padding: "8px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
                   Save
@@ -2763,6 +2789,17 @@ export default function App() {
   // On load, ask the backend whether this browser already has a signed-in
   // session (session cookie from a previous visit) so a page refresh doesn't
   // bounce a signed-in user back to the sign-in screen.
+  // Fetches this account's saved tickets from the backend (see tickets.py)
+  // and replaces whatever's currently in liveTickets. Called after every
+  // successful sign-in/sign-up/session-restore so tickets follow the
+  // account instead of living only in this browser tab's memory.
+  const loadTickets = () => {
+    fetch(`${API_BASE}/api/tickets`, { credentials: "include" })
+      .then(res => res.json())
+      .then(data => setLiveTickets(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  };
+
   useEffect(() => {
     fetch(`${API_BASE}/api/auth/me`, { credentials: "include" })
       .then(res => res.json())
@@ -2774,6 +2811,7 @@ export default function App() {
           const prefs = loadProfilePrefs(data.email);
           setNotifications(prefs.notifications);
           setDefaultAssign(prefs.defaultAssign);
+          loadTickets();
         }
       })
       .catch(() => {})
@@ -2847,6 +2885,7 @@ export default function App() {
                   const prefs = loadProfilePrefs(data.email);
                   setNotifications(prefs.notifications);
                   setDefaultAssign(prefs.defaultAssign);
+                  loadTickets();
                 }}
                 onGoSignUp={() => setAuthScreen("signup")}
               />
