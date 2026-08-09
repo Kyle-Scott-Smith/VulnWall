@@ -624,6 +624,278 @@ function SignUp({ onSignUp, onGoSignIn }) {
   );
 }
 
+//Business Context Questionnaire
+// Shown once, right after signup (and to any returning signed-in user who
+// hasn't completed it yet — e.g. an account created before this step
+// existed). Captures just enough business context to compute an initial
+// CriticalityTier and give AI analysis/prioritisation something to weight
+// against beyond raw CVSS. Deeper context is gathered conversationally by
+// the scan chatbot afterward, so this stays short on purpose.
+const SECTOR_OPTIONS = [
+  { value: "healthcare", label: "Healthcare / Medical" },
+  { value: "banking_finance", label: "Banking & Finance" },
+  { value: "government_public_sector", label: "Government / Public Sector" },
+  { value: "education", label: "Education" },
+  { value: "technology_saas", label: "Technology / SaaS" },
+  { value: "retail_ecommerce", label: "Retail / E-commerce" },
+  { value: "manufacturing_industrial", label: "Manufacturing / Industrial" },
+  { value: "energy_utilities", label: "Energy / Utilities" },
+  { value: "legal", label: "Legal" },
+  { value: "other", label: "Other" },
+];
+
+const DATA_SENSITIVITY_OPTIONS = [
+  { value: "credentials", label: "Passwords / credentials / API keys" },
+  { value: "financial", label: "Banking or financial details" },
+  { value: "medical", label: "Medical conditions / health records" },
+  { value: "pii", label: "Other personal data (names, addresses, etc.)" },
+  { value: "intellectual_property", label: "Intellectual property / trade secrets" },
+  { value: "none", label: "None of the above" },
+];
+
+// availabilityImpact -> criticalityTier. Five tiers so there's a middle
+// ground between "major disruption" and "minor inconvenience" rather than
+// forcing a binary choice.
+const AVAILABILITY_OPTIONS = [
+  { value: "life_safety", label: "Critical — life-safety impact", tier: 1 },
+  { value: "major_disruption", label: "Major business disruption", tier: 2 },
+  { value: "moderate_disruption", label: "Moderate disruption — workarounds available", tier: 3 },
+  { value: "minor_inconvenience", label: "Minor inconvenience", tier: 4 },
+  { value: "no_impact", label: "No significant impact", tier: 5 },
+];
+
+const INTERNET_FACING_OPTIONS = [
+  { value: "public", label: "Public-facing — reachable from the internet" },
+  { value: "internal", label: "Internal only — private network / VPN" },
+  { value: "mixed", label: "Mixed — some services public, some internal" },
+];
+
+// Not exhaustive, but covers the frameworks that most change how a
+// vulnerability should be prioritised (breach notification clocks,
+// mandated patch windows, audit evidence requirements, etc.).
+const COMPLIANCE_OPTIONS = [
+  { value: "hipaa", label: "HIPAA" },
+  { value: "pci_dss", label: "PCI DSS" },
+  { value: "gdpr", label: "GDPR" },
+  { value: "soc2", label: "SOC 2" },
+  { value: "iso27001", label: "ISO 27001" },
+  { value: "fedramp_nist", label: "FedRAMP / NIST 800-53" },
+  { value: "none", label: "None / not sure" },
+];
+
+// Shared control styles so the form matches SignIn/SignUp.
+const qLabelStyle = { fontSize: 13, fontWeight: 700, color: "#111", marginBottom: 4 };
+const qSubStyle = { fontSize: 12, color: "#6b7280", marginBottom: 10 };
+const qFieldStyle = { width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" };
+
+// Looks up the human-readable label for a stored value in one of the
+// *_OPTIONS arrays above — used by the read-only summary in Profile.
+function optionLabel(options, value) {
+  return options.find(o => o.value === value)?.label || value;
+}
+
+function CheckboxOption({ checked, label, onChange }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 8, border: `1px solid ${checked ? "#2563eb" : "#e5e7eb"}`, background: checked ? "#eff6ff" : "#fff", cursor: "pointer", marginBottom: 6, fontSize: 13, color: "#374151" }}>
+      <input type="checkbox" className="cb" checked={checked} onChange={onChange} />
+      {label}
+    </label>
+  );
+}
+
+function RadioOption({ checked, label, onChange }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 8, border: `1px solid ${checked ? "#2563eb" : "#e5e7eb"}`, background: checked ? "#eff6ff" : "#fff", cursor: "pointer", marginBottom: 6, fontSize: 13, color: "#374151" }}>
+      <input type="radio" checked={checked} onChange={onChange} style={{ width: 16, height: 16, flexShrink: 0, accentColor: "#2563eb" }} />
+      {label}
+    </label>
+  );
+}
+
+// Toggling a "none"-style option in a multi-select clears every other
+// option (and vice versa) — same rule the backend enforces.
+function toggleMulti(list, value, exclusiveValue = "none") {
+  if (value === exclusiveValue) return list.includes(value) ? [] : [exclusiveValue];
+  const withoutExclusive = list.filter(v => v !== exclusiveValue);
+  return withoutExclusive.includes(value) ? withoutExclusive.filter(v => v !== value) : [...withoutExclusive, value];
+}
+
+// `initialData` (shape matches GET /api/business-context/me) prefills the
+// form for editing from Profile; leave it null for the fresh-signup case.
+// `mode` only changes copy/labels — "onboarding" (first-time, no cancel
+// option) or "edit" (from Profile, cancellable). `onComplete` is called
+// with the saved record so the caller can update its own state without a
+// second round-trip.
+function BusinessContextStep({ onComplete, onCancel, initialData = null, mode = "onboarding" }) {
+  const [sector, setSector] = useState(initialData?.sector || "");
+  const [sectorOther, setSectorOther] = useState(initialData?.sectorOther || "");
+  const [dataSensitivity, setDataSensitivity] = useState(initialData?.dataSensitivity || []);
+  const [availabilityImpact, setAvailabilityImpact] = useState(initialData?.availabilityImpact || "");
+  const [internetFacing, setInternetFacing] = useState(initialData?.internetFacing || "");
+  const [complianceScope, setComplianceScope] = useState(initialData?.complianceScope || []);
+  const [airGapped, setAirGapped] = useState(initialData?.airGapped ?? null); // null | true | false
+  const [airGappedDetails, setAirGappedDetails] = useState(initialData?.airGappedDetails || "");
+  const [hasSecurityTeam, setHasSecurityTeam] = useState(initialData?.hasSecurityTeam ?? null); // optional
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const valid =
+    sector && (sector !== "other" || sectorOther.trim()) &&
+    dataSensitivity.length > 0 &&
+    availabilityImpact &&
+    internetFacing &&
+    complianceScope.length > 0 &&
+    airGapped !== null;
+
+  const handle = async () => {
+    if (!valid) { setError("Please answer every question before continuing"); return; }
+    setError("");
+    setSubmitting(true);
+    const payload = {
+      sector,
+      sectorOther: sector === "other" ? sectorOther.trim() : undefined,
+      dataSensitivity,
+      availabilityImpact,
+      internetFacing,
+      complianceScope,
+      airGapped,
+      airGappedDetails: airGapped ? airGappedDetails.trim() : undefined,
+      hasSecurityTeam,
+    };
+    try {
+      const res = await fetch(`${API_BASE}/api/business-context`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || "Couldn't save your answers"); return; }
+      onComplete({ ...payload, completed: true, criticalityTier: data.criticalityTier });
+    } catch {
+      setError("Couldn't reach the server. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "24px 0" }}>
+      <div style={{ width: 560, maxWidth: "100%", background: "#fff", borderRadius: 20, padding: 36, boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 4 }}>
+          {mode === "edit" ? "Update your environment" : "Tell us about your environment"}
+        </div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 28 }}>
+          {mode === "edit"
+            ? "Change any answers below — this updates how we prioritise vulnerabilities going forward."
+            : "A few quick questions so we can prioritise vulnerabilities by business impact, not just CVSS. Anything else we need, our assistant will ask you along the way."}
+        </div>
+
+        {error && <div style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", padding: "8px 12px", borderRadius: 8, marginBottom: 20 }}>{error}</div>}
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>What is your department / sector?</div>
+          <div style={qSubStyle}>e.g. Medical, IT, Banking</div>
+          <select style={qFieldStyle} value={sector} onChange={e => setSector(e.target.value)}>
+            <option value="" disabled>Select one…</option>
+            {SECTOR_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          {sector === "other" && (
+            <input
+              style={{ ...qFieldStyle, marginTop: 8 }}
+              placeholder="Describe your sector"
+              value={sectorOther}
+              onChange={e => setSectorOther(e.target.value)}
+            />
+          )}
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>Does your network include any of the following sensitive data?</div>
+          <div style={qSubStyle}>Select all that apply</div>
+          {DATA_SENSITIVITY_OPTIONS.map(o => (
+            <CheckboxOption key={o.value} label={o.label} checked={dataSensitivity.includes(o.value)}
+              onChange={() => setDataSensitivity(s => toggleMulti(s, o.value))} />
+          ))}
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>How important is availability of your system?</div>
+          <div style={qSubStyle}>If it went down, what would that mean for you?</div>
+          {AVAILABILITY_OPTIONS.map(o => (
+            <RadioOption key={o.value} label={o.label} checked={availabilityImpact === o.value}
+              onChange={() => setAvailabilityImpact(o.value)} />
+          ))}
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>Is this system reachable from the public internet?</div>
+          <div style={qSubStyle}>Internet-facing findings are usually higher priority than internal-only ones</div>
+          {INTERNET_FACING_OPTIONS.map(o => (
+            <RadioOption key={o.value} label={o.label} checked={internetFacing === o.value}
+              onChange={() => setInternetFacing(o.value)} />
+          ))}
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>Are you subject to any regulatory or compliance frameworks?</div>
+          <div style={qSubStyle}>Select all that apply — this affects how urgently some findings need to be remediated</div>
+          {COMPLIANCE_OPTIONS.map(o => (
+            <CheckboxOption key={o.value} label={o.label} checked={complianceScope.includes(o.value)}
+              onChange={() => setComplianceScope(s => toggleMulti(s, o.value))} />
+          ))}
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>Does your network include any air-gapped machines?</div>
+          <div style={qSubStyle}>Non-internet-facing systems we should be careful not to scan</div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <RadioOption label="Yes" checked={airGapped === true} onChange={() => setAirGapped(true)} />
+            <RadioOption label="No" checked={airGapped === false} onChange={() => setAirGapped(false)} />
+          </div>
+          {airGapped === true && (
+            <textarea
+              style={{ ...qFieldStyle, marginTop: 4, resize: "vertical" }}
+              rows={2}
+              placeholder="Which systems or IP ranges, so we can exclude them from scans?"
+              value={airGappedDetails}
+              onChange={e => setAirGappedDetails(e.target.value)}
+            />
+          )}
+        </div>
+
+        <div style={{ marginBottom: 28 }}>
+          <div style={qLabelStyle}>Do you have a dedicated security or IT team to handle remediation?</div>
+          <div style={qSubStyle}>Optional — helps us judge how prescriptive fix guidance should be</div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <RadioOption label="Yes" checked={hasSecurityTeam === true} onChange={() => setHasSecurityTeam(true)} />
+            <RadioOption label="No" checked={hasSecurityTeam === false} onChange={() => setHasSecurityTeam(false)} />
+            <RadioOption label="Not sure" checked={hasSecurityTeam === null} onChange={() => setHasSecurityTeam(null)} />
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 12 }}>
+          {mode === "edit" && (
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={submitting}
+              style={{ flex: 1, padding: "12px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: submitting ? "default" : "pointer" }}>
+              Cancel
+            </button>
+          )}
+          <button
+            onClick={handle}
+            disabled={submitting || !valid}
+            style={{ flex: 1, padding: "12px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: (submitting || !valid) ? "default" : "pointer", opacity: (submitting || !valid) ? 0.6 : 1 }}>
+            {submitting ? "Saving…" : mode === "edit" ? "Save changes" : "Continue"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 //Upload step 1: Upload Scan
 // The backend cross-references every CVE in an uploaded/scanned file against
 // the Tenable.io API automatically (see /api/upload-scan and /api/scan), and
@@ -2106,6 +2378,82 @@ function RegistryConnect() {
 }
 
 //Profile
+// Read-only summary of the business-context questionnaire, with an Edit
+// button that swaps in the same BusinessContextStep form used at signup
+// (prefilled via `initialData`). Fetches its own data so Profile doesn't
+// need to carry it around as top-level app state.
+function BusinessContextSummary() {
+  const [data, setData] = useState({ loading: true });
+  const [editing, setEditing] = useState(false);
+
+  const refresh = () => {
+    setData({ loading: true });
+    fetch(`${API_BASE}/api/business-context/me`, { credentials: "include" })
+      .then(res => res.json())
+      .then(d => setData({ loading: false, ...d }))
+      .catch(() => setData({ loading: false, completed: false, error: true }));
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  if (data.loading) return null;
+
+  if (editing) {
+    return (
+      <BusinessContextStep
+        mode="edit"
+        initialData={data.completed ? data : null}
+        onCancel={() => setEditing(false)}
+        onComplete={saved => { setData({ loading: false, ...saved }); setEditing(false); }}
+      />
+    );
+  }
+
+  if (!data.completed) {
+    return (
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Business context</div>
+          <div style={{ fontSize: 12, color: "#6b7280" }}>Not set yet — helps us prioritise vulnerabilities by business impact</div>
+        </div>
+        <button
+          onClick={() => setEditing(true)}
+          style={{ padding: "8px 14px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+          Add answers
+        </button>
+      </div>
+    );
+  }
+
+  const sensitivityLabels = data.dataSensitivity.map(v => optionLabel(DATA_SENSITIVITY_OPTIONS, v));
+  const complianceLabels = data.complianceScope.map(v => optionLabel(COMPLIANCE_OPTIONS, v));
+  const chip = text => (
+    <span key={text} style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: "#eff6ff", color: "#2563eb" }}>{text}</span>
+  );
+
+  return (
+    <div style={{ padding: "14px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>
+          {data.sector === "other" ? data.sectorOther : optionLabel(SECTOR_OPTIONS, data.sector)}
+        </div>
+        <button
+          onClick={() => setEditing(true)}
+          style={{ padding: "6px 14px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151", flexShrink: 0 }}>
+          Edit
+        </button>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {chip(`Criticality Tier ${data.criticalityTier}`)}
+        {chip(optionLabel(INTERNET_FACING_OPTIONS, data.internetFacing))}
+        {data.airGapped && chip("Has air-gapped systems")}
+        {sensitivityLabels.map(chip)}
+        {complianceLabels.map(chip)}
+      </div>
+    </div>
+  );
+}
+
 function Profile({ onSignOut, userName, userEmail, notifications, setNotifications, defaultAssign, setDefaultAssign }) {
 
   return (
@@ -2173,6 +2521,11 @@ function Profile({ onSignOut, userName, userEmail, notifications, setNotificatio
             <option>Platform Engineering</option>
           </select>
         </div>
+      </div>
+
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Business context</div>
+        <BusinessContextSummary />
       </div>
 
       <div style={{ marginBottom: 24 }}>
@@ -2402,6 +2755,10 @@ export default function App() {
   const [userEmail, setUserEmail] = useState("");
   const [notifications, setNotifications] = useState(DEFAULT_PROFILE_PREFS.notifications);
   const [defaultAssign, setDefaultAssign] = useState(DEFAULT_PROFILE_PREFS.defaultAssign);
+  // Only true for the stretch between a fresh signup and finishing the
+  // business-context questionnaire — sign-in and session-restore never
+  // set this, so returning users go straight to the dashboard.
+  const [showBusinessContext, setShowBusinessContext] = useState(false);
 
   // On load, ask the backend whether this browser already has a signed-in
   // session (session cookie from a previous visit) so a page refresh doesn't
@@ -2501,10 +2858,22 @@ export default function App() {
                   const prefs = loadProfilePrefs(data.email);
                   setNotifications(prefs.notifications);
                   setDefaultAssign(prefs.defaultAssign);
+                  setShowBusinessContext(true);
                 }}
                 onGoSignIn={() => setAuthScreen("signin")}
               />
           }
+        </div>
+      </>
+    );
+  }
+
+  if (showBusinessContext) {
+    return (
+      <>
+        <style>{css}</style>
+        <div className="shell">
+          <BusinessContextStep onComplete={() => setShowBusinessContext(false)} />
         </div>
       </>
     );
@@ -2532,6 +2901,7 @@ export default function App() {
               setAuthScreen("signin");
               setUserName("");
               setUserEmail("");
+              setShowBusinessContext(false);
             }}
             userName={userName}
             userEmail={userEmail}

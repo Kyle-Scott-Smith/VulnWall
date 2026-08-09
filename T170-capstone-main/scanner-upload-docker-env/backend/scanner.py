@@ -14,6 +14,7 @@ from scanners.utils import dedupe_by_cve, sort_by_severity
 from jira_integration import jira_bp
 from registry_credentials import registry_bp, get_credentials as get_registry_credentials
 from auth import auth_bp
+from business_context import business_context_bp
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +35,7 @@ CORS(app, supports_credentials=True)
 app.register_blueprint(jira_bp)
 app.register_blueprint(registry_bp)
 app.register_blueprint(auth_bp)
+app.register_blueprint(business_context_bp)
 
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB safety limit for uploaded scan files
 
