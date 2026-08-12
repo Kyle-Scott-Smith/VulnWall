@@ -393,6 +393,37 @@ def submit():
 @business_context_bp.route("/me", methods=["GET"])
 def me():
     user_id = _require_login()
+      if not user_id:
+        return jsonify({"completed": False})
+
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM business_context WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return jsonify({"completed": False})
+
+    return jsonify(
+        {
+            "completed": True,
+            "sector": row["sector"],
+            "sectorOther": row["sector_other"],
+            "dataSensitivity": json.loads(row["data_sensitivity"]),
+            "availabilityImpact": row["availability_impact"],
+            "criticalityTier": row["criticality_tier"],
+            "internetFacing": row["internet_facing"],
+            "complianceScope": json.loads(row["compliance_scope"]),
+            "airGapped": bool(row["air_gapped"]),
+            "airGappedDetails": row["air_gapped_details"],
+            "hasSecurityTeam": None
+            if row["has_security_team"] is None
+            else bool(row["has_security_team"]),
+        }
+    )
     context = get_context_for_user(user_id)
     return jsonify(context if context else {"completed": False})
 
