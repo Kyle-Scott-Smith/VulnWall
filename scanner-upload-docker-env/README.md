@@ -130,5 +130,6 @@ production WSGI server (e.g. gunicorn) before deploying it for real.
     ├── business_context.py   # onboarding questionnaire — see README-business-context-ai.md
     ├── tenable_client.py     # Tenable.io CVE cross-reference lookup
     ├── auth.py, dashboard.py, scans.py, tickets.py, registry_credentials.py, jira_integration.py
+    ├── jira_integration.py
     └── scanners/             # pluggable scan-source parsers (trivy, tenable, ...)
 ```
