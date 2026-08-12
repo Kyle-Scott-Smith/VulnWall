@@ -8,13 +8,22 @@ included in every call as context, and the model is told not to reference
 anything outside it. This is deliberately NOT a general security assistant —
 it only knows what's in the scan you hand it.
 
+Business context (from the post-signup questionnaire, business_context.py)
+is optional per call — pass it via ask(..., business_context=...) and the
+model factors the org's sector, data sensitivity, and compliance
+obligations into its answers (e.g. "which of these should we fix first"
+gets a business-risk-aware answer, not just a CVSS sort). Omit it for the
+previous generic behavior.
+
 Previously called the Claude API — swapped to a local Ollama model via
-ollama_client.py. Interface (.ask()) is unchanged.
+ollama_client.py. Interface (.ask()) is unchanged except for the new
+optional business_context parameter.
 """
 import logging
 import os
 
 from ollama_client import chat as ollama_chat
+from business_context import format_context_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +39,11 @@ Rules:
 - Be concise: a few sentences or a short list, not a report.
 - When asked "which CVEs affect host X" or similar, list matching CVE IDs with severity.
 - When asked for a count or "how many", give the exact number from the data below.
-
+- If a BUSINESS CONTEXT section is provided below, use it when the question involves prioritisation, risk, or
+  "what should we fix first" — weigh business criticality, data sensitivity, and compliance exposure alongside
+  CVSS/severity rather than defaulting to a pure severity sort, and name the specific business/compliance reason
+  when it changes your answer. If no BUSINESS CONTEXT section is provided, answer from severity/CVSS alone as before.
+{business_context}
 Current scan data ({count} findings):
 {context}
 """
@@ -59,19 +72,26 @@ class ScanChatbot:
             )
         return "\n".join(lines) if lines else "(no findings in this scan)"
 
-    def ask(self, question: str, vulnerabilities: list, history: list = None) -> str:
+    def ask(self, question: str, vulnerabilities: list, history: list = None, business_context: dict = None) -> str:
         """
         question: the user's latest message
         vulnerabilities: the current scan's normalized findings (same shape
             used everywhere else in this app)
         history: optional prior turns, [{"role": "user"|"assistant", "content": "..."}]
+        business_context: optional dict from business_context.get_context_for_user/
+            _session — see module docstring.
 
         Raises OllamaError on failure (e.g. server unreachable, model not
         pulled) — scanner.py's /api/chat route catches this and returns a
         502 with the message, same as it did for Claude API errors before.
         """
         context = self._build_context(vulnerabilities or [])
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(count=len(vulnerabilities or []), context=context)
+        context_block = format_context_for_prompt(business_context)
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            count=len(vulnerabilities or []),
+            context=context,
+            business_context=(context_block + "\n\n") if context_block else "",
+        )
 
         messages = []
         for turn in (history or [])[-MAX_HISTORY_TURNS:]:

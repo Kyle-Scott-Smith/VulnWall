@@ -108,6 +108,7 @@ production WSGI server (e.g. gunicorn) before deploying it for real.
 ├── docker-compose.yml
 ├── README-jira-integration.md
 ├── README-ollama-swap.md
+├── README-business-context-ai.md
 ├── frontend/
 │   ├── Dockerfile
 │   ├── .dockerignore
@@ -122,11 +123,12 @@ production WSGI server (e.g. gunicorn) before deploying it for real.
     ├── .dockerignore
     ├── .env.example
     ├── requirements.txt
-    ├── scanner.py         # Flask API: /api/health, /api/scanners, /api/upload-scan, /api/scan, /api/analyze, /api/chat
-    ├── ollama_client.py   # local Ollama HTTP client — see README-ollama-swap.md
-    ├── ai_analysis.py     # AI vulnerability analysis (Ollama-backed)
-    ├── chatbot.py         # scan-scoped chatbot (Ollama-backed)
-    ├── tenable_client.py  # Tenable.io CVE cross-reference lookup
-    ├── jira_integration.py
-    └── scanners/          # pluggable scan-source parsers (trivy, tenable, ...)
+    ├── scanner.py            # Flask API: /api/health, /api/scanners, /api/upload-scan, /api/scan, /api/analyze, /api/chat
+    ├── ollama_client.py      # local Ollama HTTP client — see README-ollama-swap.md
+    ├── ai_analysis.py        # AI vulnerability analysis (Ollama-backed, business-context-aware)
+    ├── chatbot.py            # scan-scoped chatbot (Ollama-backed, business-context-aware)
+    ├── business_context.py   # onboarding questionnaire — see README-business-context-ai.md
+    ├── tenable_client.py     # Tenable.io CVE cross-reference lookup
+    ├── auth.py, dashboard.py, scans.py, tickets.py, registry_credentials.py, jira_integration.py
+    └── scanners/             # pluggable scan-source parsers (trivy, tenable, ...)
 ```

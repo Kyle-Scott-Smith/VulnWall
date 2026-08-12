@@ -89,6 +89,51 @@ SECTOR_OPTIONS = {
     "other",
 }
 
+# --- Human-readable labels for prompt text (AI analysis + chatbot) ------
+# Same options as above, phrased the way you'd actually want a model to
+# read them rather than as wire-format enum values. Kept next to the
+# options they label so the two can't silently drift apart.
+
+SECTOR_LABELS = {
+    "healthcare": "Healthcare",
+    "banking_finance": "Banking & Finance",
+    "government_public_sector": "Government / Public Sector",
+    "education": "Education",
+    "technology_saas": "Technology / SaaS",
+    "retail_ecommerce": "Retail / E-commerce",
+    "manufacturing_industrial": "Manufacturing / Industrial",
+    "energy_utilities": "Energy / Utilities",
+    "legal": "Legal",
+    "other": "Other",
+}
+
+DATA_SENSITIVITY_LABELS = {
+    "credentials": "credentials / secrets",
+    "financial": "financial or payment data",
+    "medical": "medical records / PHI",
+    "pii": "personally identifiable information (PII)",
+    "intellectual_property": "intellectual property",
+    "none": "no sensitive data",
+}
+
+COMPLIANCE_LABELS = {
+    "hipaa": "HIPAA",
+    "pci_dss": "PCI DSS",
+    "gdpr": "GDPR",
+    "soc2": "SOC 2",
+    "iso27001": "ISO 27001",
+    "fedramp_nist": "FedRAMP / NIST",
+    "none": "no specific compliance framework",
+}
+
+AVAILABILITY_LABELS = {
+    "life_safety": "life-safety critical if unavailable",
+    "major_disruption": "major business disruption if unavailable",
+    "moderate_disruption": "moderate disruption if unavailable (workarounds available)",
+    "minor_inconvenience": "minor inconvenience if unavailable",
+    "no_impact": "no significant impact if unavailable",
+}
+
 
 def init_business_context_db():
     """Creates the business_context table if it doesn't exist yet. Called
@@ -171,6 +216,113 @@ def _validate(body):
     return None
 
 
+def _row_to_dict(row):
+    return {
+        "completed": True,
+        "sector": row["sector"],
+        "sectorOther": row["sector_other"],
+        "dataSensitivity": json.loads(row["data_sensitivity"]),
+        "availabilityImpact": row["availability_impact"],
+        "criticalityTier": row["criticality_tier"],
+        "internetFacing": row["internet_facing"],
+        "complianceScope": json.loads(row["compliance_scope"]),
+        "airGapped": bool(row["air_gapped"]),
+        "airGappedDetails": row["air_gapped_details"],
+        "hasSecurityTeam": None
+        if row["has_security_team"] is None
+        else bool(row["has_security_team"]),
+    }
+
+
+def get_context_for_user(user_id):
+    """Returns the context dict for a given user_id, or None if they
+    haven't completed the questionnaire (or don't exist). This is the
+    function other modules (ai_analysis.py, chatbot.py) should call —
+    plain dict in, plain dict or None out, no Flask request/response
+    coupling, so it works the same whether called from a route or from
+    deep inside a per-vulnerability analysis loop."""
+    if not user_id:
+        return None
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM business_context WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return _row_to_dict(row) if row else None
+
+
+def get_context_for_session():
+    """Convenience wrapper for route handlers: reads user_id off the
+    current Flask session. Returns None for anonymous sessions or users
+    who haven't completed the questionnaire — every caller (AI analysis,
+    chatbot) already treats None as "no context available, proceed
+    without it" rather than an error."""
+    return get_context_for_user(session.get("user_id"))
+
+
+def format_context_for_prompt(context) -> str:
+    """
+    Turns a context dict (from get_context_for_user/_session) into a text
+    block for an LLM system prompt. Returns "" for None/incomplete context
+    so callers can always do f"...{format_context_for_prompt(ctx)}..." —
+    no special-casing needed for users who skipped the questionnaire.
+
+    Kept here rather than in ai_analysis.py/chatbot.py so the sector/data/
+    compliance label mappings have exactly one source of truth — the AI
+    analyzer and the chatbot both call this and will always describe the
+    same context the same way.
+    """
+    if not context or not context.get("completed"):
+        return ""
+
+    sector = context.get("sector")
+    sector_label = SECTOR_LABELS.get(sector, sector or "unspecified")
+    if sector == "other" and context.get("sectorOther"):
+        sector_label = context["sectorOther"]
+
+    data_labels = [DATA_SENSITIVITY_LABELS.get(d, d) for d in context.get("dataSensitivity") or []]
+    compliance_labels = [COMPLIANCE_LABELS.get(c, c) for c in context.get("complianceScope") or []]
+    availability_label = AVAILABILITY_LABELS.get(
+        context.get("availabilityImpact"), context.get("availabilityImpact") or "unspecified"
+    )
+
+    lines = [
+        "BUSINESS CONTEXT for this organisation — factor this into severity reasoning, "
+        "remediation urgency, and how you phrase explanations and fixes. Do not ignore it "
+        "in favour of generic, industry-agnostic advice.",
+        f"- Industry/sector: {sector_label}",
+        f"- Data handled by affected systems: {', '.join(data_labels) or 'unspecified'}",
+        f"- Business impact if unavailable: {availability_label} "
+        f"(internal criticality tier {context.get('criticalityTier')}/5, 1 = most critical)",
+        f"- Internet exposure: {context.get('internetFacing') or 'unspecified'}",
+        f"- Compliance frameworks in scope: {', '.join(compliance_labels) or 'none specified'}",
+    ]
+    if context.get("airGapped"):
+        detail = f" ({context['airGappedDetails']})" if context.get("airGappedDetails") else ""
+        lines.append(
+            f"- Some affected systems are air-gapped{detail} — standard "
+            f"internet-delivered patching may not apply; consider offline/manual "
+            f"patch delivery, change windows, and physical access constraints in fixes."
+        )
+    if context.get("hasSecurityTeam") is False:
+        lines.append(
+            "- No dedicated security team — prefer fixes an IT generalist can execute "
+            "without specialist security tooling, and suggest compensating controls "
+            "(e.g. network segmentation, WAF rules, disabling the affected feature) "
+            "when immediate patching isn't realistic."
+        )
+    elif context.get("hasSecurityTeam") is True:
+        lines.append(
+            "- A dedicated security team exists — deeper/more technical remediation "
+            "guidance (e.g. custom detection rules, deeper root-cause investigation) "
+            "is appropriate, not just the generalist-friendly baseline."
+        )
+
+    return "\n".join(lines)
+
+
 @business_context_bp.route("", methods=["POST"])
 def submit():
     user_id = _require_login()
@@ -241,37 +393,8 @@ def submit():
 @business_context_bp.route("/me", methods=["GET"])
 def me():
     user_id = _require_login()
-    if not user_id:
-        return jsonify({"completed": False})
-
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT * FROM business_context WHERE user_id = ?", (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-
-    if not row:
-        return jsonify({"completed": False})
-
-    return jsonify(
-        {
-            "completed": True,
-            "sector": row["sector"],
-            "sectorOther": row["sector_other"],
-            "dataSensitivity": json.loads(row["data_sensitivity"]),
-            "availabilityImpact": row["availability_impact"],
-            "criticalityTier": row["criticality_tier"],
-            "internetFacing": row["internet_facing"],
-            "complianceScope": json.loads(row["compliance_scope"]),
-            "airGapped": bool(row["air_gapped"]),
-            "airGappedDetails": row["air_gapped_details"],
-            "hasSecurityTeam": None
-            if row["has_security_team"] is None
-            else bool(row["has_security_team"]),
-        }
-    )
+    context = get_context_for_user(user_id)
+    return jsonify(context if context else {"completed": False})
 
 
 init_business_context_db()

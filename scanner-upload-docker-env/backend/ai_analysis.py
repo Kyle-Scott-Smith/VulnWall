@@ -11,8 +11,17 @@ UI doesn't display it yet.
 Design mirrors the capstone's LLM-integration notes: grounded prompt
 (never rely on the model's training memory for CVE facts), strict JSON
 contract, retry with a simplified prompt on malformed output, template
-fallback if both attempts fail, and a cache keyed by CVE ID so re-running
-the same scan doesn't re-spend tokens/compute on unchanged findings.
+fallback if both attempts fail, and a cache keyed by CVE ID + business
+context so re-running the same scan doesn't re-spend tokens/compute on
+unchanged findings.
+
+Business context (from the post-signup questionnaire, business_context.py)
+is optional per call — pass it via analyze(vuln, business_context=...) and
+it's woven into both the severity/priority reasoning and the fix wording,
+so recommendations reflect the org's actual sector, data sensitivity,
+compliance obligations, and environment rather than generic CVSS-only
+advice. Callers with no context (anonymous session, questionnaire not yet
+completed) get the same behavior as before this feature existed.
 
 Previously called the Claude API — swapped to a local Ollama model. The
 class does the same job so scanner.py's usage didn't need to change beyond
@@ -23,6 +32,7 @@ import logging
 import os
 
 from ollama_client import chat as ollama_chat, OllamaError
+from business_context import format_context_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +48,14 @@ Rules:
   "confidence" (integer 0-100, how confident you are in this analysis given the completeness of the input data —
     lower it when the description or CVSS data is missing or thin),
   "priority_tier" (string, one of "P1", "P2", "P3", "P4" — P1 is most urgent, must be consistent with the input
-    CVSS score: don't assign P1/P2 below CVSS 7.0 unless the input notes a known public exploit; don't assign
-    P3/P4 to CVSS 9.0+).
+    CVSS score: don't assign P1/P2 below CVSS 7.0 unless the input notes a known public exploit, OR a BUSINESS
+    CONTEXT section is present indicating internet-facing exposure combined with high business criticality
+    (tier 1-2) or sensitive/regulated data — in that case a one-tier escalation above the CVSS-only tier is
+    allowed and should be explained in "why". Never assign P3/P4 to CVSS 9.0+ regardless of business context.
+- If a BUSINESS CONTEXT section is present in the prompt, use it to tailor "why" (name the specific business
+  risk or compliance exposure in this organisation's terms, not generic language) and "fixes" (make them
+  realistic for this environment — see the BUSINESS CONTEXT section for what that means here). If no BUSINESS
+  CONTEXT section is present, give generic best-practice guidance as before.
 """
 
 _SIMPLIFIED_SYSTEM_PROMPT = """You are a cybersecurity analyst. Only use the data given.
@@ -47,6 +63,29 @@ Respond ONLY with JSON: {"why": "...", "fixes": ["...", "..."], "confidence": 0-
 No other text."""
 
 _REQUIRED_FIELDS = {"why": str, "fixes": list, "confidence": int, "priority_tier": str}
+
+
+def _context_fingerprint(business_context):
+    """Small hashable summary of a business context dict, used only to key
+    the analysis cache. The analyzer instance is a process-wide singleton
+    shared across every user's requests (see scanner.py's _get_analyzer),
+    so the cache MUST be keyed by context as well as CVE — otherwise one
+    org's healthcare/HIPAA-flavored analysis could get served back to a
+    different org with a completely different risk profile for the same
+    CVE. None (no context) is its own distinct fingerprint."""
+    if not business_context:
+        return None
+    return (
+        business_context.get("sector"),
+        business_context.get("sectorOther"),
+        tuple(sorted(business_context.get("dataSensitivity") or [])),
+        business_context.get("availabilityImpact"),
+        business_context.get("internetFacing"),
+        tuple(sorted(business_context.get("complianceScope") or [])),
+        business_context.get("airGapped"),
+        business_context.get("airGappedDetails"),
+        business_context.get("hasSecurityTeam"),
+    )
 
 
 class OllamaVulnerabilityAnalyzer:
@@ -64,10 +103,12 @@ class OllamaVulnerabilityAnalyzer:
         self.model = model
         self._cache = {}
 
-    def _build_user_prompt(self, vuln: dict) -> str:
+    def _build_user_prompt(self, vuln: dict, business_context: dict = None) -> str:
         """Grounded context only — CVE facts, no real hostnames (asset field
         here is already whatever the scanner's parse() produced, which for
-        Trivy uploads is the scan target string, not a live hostname)."""
+        Trivy uploads is the scan target string, not a live hostname).
+        Business context (if provided) is appended as its own section so
+        the model can weigh it separately from the raw CVE facts."""
         lines = [
             f"CVE ID: {vuln.get('cve') or 'N/A (no CVE mapped, use title/description)'}",
             f"Title: {vuln.get('title', '')}",
@@ -77,6 +118,12 @@ class OllamaVulnerabilityAnalyzer:
         ]
         if vuln.get("package"):
             lines.append(f"Affected package: {vuln['package']} (installed: {vuln.get('installedVersion', 'unknown')})")
+
+        context_block = format_context_for_prompt(business_context)
+        if context_block:
+            lines.append("")
+            lines.append(context_block)
+
         return "\n".join(lines)
 
     def _call_ollama(self, system_prompt: str, user_prompt: str):
@@ -116,29 +163,35 @@ class OllamaVulnerabilityAnalyzer:
     def _severity_to_tier(severity: str) -> str:
         return {"Critical": "P1", "High": "P2", "Medium": "P3", "Low": "P4"}.get(severity, "P3")
 
-    def analyze(self, vuln: dict) -> dict:
+    def analyze(self, vuln: dict, business_context: dict = None) -> dict:
         """
         Returns a dict with why/fixes/confidence/priority_tier/ai_generated,
         ready to be merged into the vulnerability record (**vuln, **result).
+
+        business_context: optional dict from business_context.get_context_for_user/
+        _session — when provided, both the severity reasoning and fix
+        wording are tailored to this organisation's sector, data
+        sensitivity, compliance scope, and environment. Omit it (or pass
+        None) for the previous generic, industry-agnostic behavior.
         """
-        cache_key = vuln.get("cve") or vuln.get("title")
-        if cache_key and cache_key in self._cache:
+        cache_key = (vuln.get("cve") or vuln.get("title"), _context_fingerprint(business_context))
+        if cache_key[0] and cache_key in self._cache:
             return {**self._cache[cache_key], "from_cache": True}
 
-        user_prompt = self._build_user_prompt(vuln)
+        user_prompt = self._build_user_prompt(vuln, business_context)
         parsed = None
 
         for attempt in range(MAX_RETRIES + 1):
             parsed = self._call_ollama(SYSTEM_PROMPT, user_prompt)
             if parsed is not None:
                 break
-            logger.info("Retry %d/%d for %s", attempt + 1, MAX_RETRIES, cache_key)
+            logger.info("Retry %d/%d for %s", attempt + 1, MAX_RETRIES, cache_key[0])
 
         if parsed is None:
             parsed = self._call_ollama(_SIMPLIFIED_SYSTEM_PROMPT, user_prompt)
 
         if parsed is None:
-            logger.warning("LLM analysis failed for %s — using template fallback", cache_key)
+            logger.warning("LLM analysis failed for %s — using template fallback", cache_key[0])
             result = {
                 "why": vuln.get("description") or "Automated analysis unavailable for this finding.",
                 "fixes": [
@@ -154,7 +207,7 @@ class OllamaVulnerabilityAnalyzer:
             return result
 
         result = {**parsed, "ai_generated": True, "from_cache": False}
-        if cache_key:
+        if cache_key[0]:
             self._cache[cache_key] = result
         return result
 

@@ -14,7 +14,7 @@ from scanners.utils import dedupe_by_cve, sort_by_severity
 from jira_integration import jira_bp
 from registry_credentials import registry_bp, get_credentials as get_registry_credentials
 from auth import auth_bp
-from business_context import business_context_bp
+from business_context import business_context_bp, get_context_for_session
 from tickets import tickets_bp
 from scans import scans_bp, record_scan
 from dashboard import dashboard_bp
@@ -245,6 +245,13 @@ def analyze():
 
     Returns the same list with why/fixes/confidence/priority_tier/ai_generated
     added to each entry - this is what the frontend's CveDetailStep reads.
+
+    If the signed-in user has completed the business context questionnaire
+    (business_context.py), that context is fetched once per request and
+    passed to every vulnerability's analysis so recommendations reflect
+    this organisation's sector, data sensitivity, and compliance scope
+    rather than generic CVSS-only advice. Anonymous sessions / users who
+    haven't completed it get the same generic behavior as before.
     """
     body = request.get_json(force=True, silent=True) or {}
     vulnerabilities = body.get("vulnerabilities")
@@ -256,11 +263,13 @@ def analyze():
     except EnvironmentError as e:
         return jsonify({"error": str(e)}), 503
 
+    business_context = get_context_for_session()
+
     analyzed = []
     for vuln in vulnerabilities:
         if not isinstance(vuln, dict):
             continue
-        ai_result = analyzer.analyze(vuln)
+        ai_result = analyzer.analyze(vuln, business_context=business_context)
         analyzed.append({**vuln, **ai_result})
 
     return jsonify({
@@ -279,6 +288,11 @@ def chat():
         "history": [ {"role": "user"|"assistant", "content": "..."}, ... ]  # optional
       }
     Returns {"answer": "..."}.
+
+    Same business-context fetch as /api/analyze — if the signed-in user
+    completed the questionnaire, it's passed through so prioritisation-
+    flavored questions ("what should we fix first") reason about business
+    risk and compliance exposure, not just CVSS.
     """
     body = request.get_json(force=True, silent=True) or {}
     question = (body.get("question") or "").strip()
@@ -297,8 +311,10 @@ def chat():
     except EnvironmentError as e:
         return jsonify({"error": str(e)}), 503
 
+    business_context = get_context_for_session()
+
     try:
-        answer = chatbot.ask(question, vulnerabilities, history)
+        answer = chatbot.ask(question, vulnerabilities, history, business_context=business_context)
     except Exception as e:
         logger.exception("Chat request failed")
         return jsonify({"error": f"Chat request failed: {str(e)}"}), 502
