@@ -328,4 +328,9 @@ if __name__ == "__main__":
     # debug=True keeps the Werkzeug auto-reloader on, so editing scanner.py
     # or any scanners/*.py file picks up changes without a rebuild (this
     # folder is bind-mounted — see docker-compose.yml).
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # threaded=True matters more now that ollama_client.py has no default
+    # timeout: without it, one slow /api/analyze or /api/chat call (a weak
+    # local model can genuinely take minutes) would block every other
+    # request on this single-threaded dev server — including unrelated
+    # users, the frontend's own health checks, etc. — until it finished.
+    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)

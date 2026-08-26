@@ -7,10 +7,20 @@ ai_analysis.py and chatbot.py needed minimal changes to swap providers —
 that's the whole point of keeping this behind one small module.
 
 No API key is needed for a local Ollama instance. What CAN fail instead:
-the server not running, the requested model not actually pulled, or a
-slow/timed-out generation — all raised here as OllamaError so callers
-have one exception type to handle instead of guessing which requests.*
-exception showed up.
+the server not running, the requested model not actually pulled, or (if
+you opt back into one — see OLLAMA_TIMEOUT_SECONDS below) a timed-out
+generation — all raised here as OllamaError so callers have one exception
+type to handle instead of guessing which requests.* exception showed up.
+
+TIMEOUT: there is NO timeout by default. A small/weak local model can
+legitimately take minutes to generate a response on modest hardware,
+especially for /api/analyze's strict-JSON prompt — the original 120s
+default was cutting those off before they could finish, which is worse
+than just waiting. Requests now block until Ollama actually responds (or
+the connection itself drops, which raises immediately — that path is NOT
+timeout-gated). Set OLLAMA_TIMEOUT_SECONDS to a positive number of seconds
+in backend/.env if you want a ceiling back (e.g. to fail fast against a
+hung server instead of hanging the request indefinitely).
 
 MODEL NAME RESOLUTION — this is the part that broke before:
 `ollama pull llama3.1` registers the model on the server as
@@ -31,7 +41,13 @@ import requests
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
-OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120"))
+
+# No timeout unless explicitly set. requests.* accepts timeout=None to mean
+# "wait forever" — that's the default here on purpose (see module
+# docstring). Empty/unset/"0" all mean "no timeout"; any other integer is
+# used as a real ceiling in seconds.
+_raw_timeout = os.getenv("OLLAMA_TIMEOUT_SECONDS", "").strip()
+OLLAMA_TIMEOUT_SECONDS = int(_raw_timeout) if _raw_timeout and _raw_timeout != "0" else None
 
 
 class OllamaError(RuntimeError):
@@ -136,7 +152,10 @@ def chat(system_prompt: str, messages: list, model: str = None, json_mode: bool 
             f"(`ollama serve` locally, or check the `ollama` service in docker-compose.yml)"
         ) from e
     except requests.Timeout as e:
-        raise OllamaError(f"Ollama request timed out after {OLLAMA_TIMEOUT_SECONDS}s") from e
+        raise OllamaError(
+            f"Ollama request timed out after {OLLAMA_TIMEOUT_SECONDS}s "
+            f"(set via OLLAMA_TIMEOUT_SECONDS in backend/.env)"
+        ) from e
     except requests.HTTPError as e:
         detail = ""
         try:

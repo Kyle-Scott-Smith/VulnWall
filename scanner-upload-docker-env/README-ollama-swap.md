@@ -52,10 +52,11 @@ Claude available again alongside it.
   "One-time setup" below. The `backend` service gets
   `OLLAMA_HOST=http://ollama:11434` and waits on both.
 - **`.env.example`** — added `OLLAMA_MODEL` (defaults to `llama3.1`),
-  `OLLAMA_TIMEOUT_SECONDS`, `AI_MAX_RETRIES`, `CHAT_MAX_CONTEXT_VULNS`.
-  `OLLAMA_HOST` is set in `docker-compose.yml` directly since it's just
-  the compose network's service name — only override it in `.env` if
-  you're pointing at Ollama running somewhere else.
+  `OLLAMA_TIMEOUT_SECONDS` (commented out — no timeout by default, see
+  below), `AI_MAX_RETRIES`, `CHAT_MAX_CONTEXT_VULNS`. `OLLAMA_HOST` is set
+  in `docker-compose.yml` directly since it's just the compose network's
+  service name — only override it in `.env` if you're pointing at Ollama
+  running somewhere else.
 
 ## Known issue we hit: "model 'llama3.1' not found" even after pulling it
 
@@ -148,6 +149,48 @@ Then run a scan through the upload flow and check a finding's
 successfully; `false` means it fell back to the template (check
 `docker compose logs backend` for the specific `OllamaError`, or hit
 `/api/ollama-status` again).
+
+## No timeout by default (was 120s)
+
+A weak/small local model on modest hardware can genuinely take minutes to
+generate the strict-JSON response `/api/analyze` asks for — the original
+120-second default was cutting generations off before they could finish,
+which produced worse results than just waiting (template fallback instead
+of a real answer). `OLLAMA_TIMEOUT_SECONDS` now defaults to no timeout at
+all — requests block until Ollama actually responds. Verified this is
+real (not just the intent) by intercepting the actual `requests.get`/
+`requests.post` calls in a test and confirming `timeout=None` reaches
+them.
+
+If you want a ceiling back (e.g. to fail fast instead of hanging against
+a genuinely stuck server), set `OLLAMA_TIMEOUT_SECONDS` to a positive
+number of seconds in `backend/.env`. Leaving it unset, or setting it to
+`0`, both mean "no timeout."
+
+One consequence worth knowing: `scanner.py`'s Flask dev server now runs
+with `threaded=True` (it didn't before). Without that, one long,
+timeout-free `/api/analyze` or `/api/chat` call would block every other
+request — including unrelated users and simple health checks — on the
+single-threaded dev server until it finished.
+
+## Swappable model, still (double-checked)
+
+The whole point of `ollama_client.py` being the only file that talks to
+Ollama is that switching models shouldn't touch `ai_analysis.py`,
+`chatbot.py`, or `scanner.py` at all. Confirmed still true:
+
+- `OllamaVulnerabilityAnalyzer(model=...)` and `ScanChatbot(model=...)`
+  both accept a per-instance model override; omitted, they fall back to
+  the `OLLAMA_MODEL` env var.
+- `resolve_model()` maps whatever you set `OLLAMA_MODEL` to against
+  whatever's actually installed (see the model-name-resolution section
+  above) — you don't need the exact tag, just something that matches.
+- To try a different model: `docker compose exec ollama ollama pull
+  <model>`, then set `OLLAMA_MODEL=<model>` in `backend/.env` and restart
+  the backend container. `GET /api/ollama-status` confirms what's
+  actually being used before you run a real scan through it.
+- Multiple models pulled at once is fine — `resolve_model` only cares
+  about matching the one `OLLAMA_MODEL` currently names.
 
 ## Swapping back or adding another provider
 
