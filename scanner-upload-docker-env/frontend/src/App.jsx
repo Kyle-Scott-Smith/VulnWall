@@ -1564,7 +1564,7 @@ function SelectStep({ onNext, onBack, selected, setSelected, onCveClick }) {
 //Upload step 4: Validation
 const VALIDATION_SORT_FIELDS = { "None": null, "CVE": "id", "Severity": "severity", "Status": "status" };
 
-function ValidationStep({ onNext, onBack, selected, onCveClick }) {
+function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
@@ -1582,6 +1582,16 @@ function ValidationStep({ onNext, onBack, selected, onCveClick }) {
     sortDir
   );
 
+  // All currently-selected CVEs still flagged "Needs Review" — this is what
+  // both the bulk button and the count above it operate on, independent of
+  // whatever the search/severity/status filters are currently narrowed to.
+  const nonValidatedIds = validationRows
+    .filter(r => selected.includes(r.id) && r.status === "Needs Review")
+    .map(r => r.id);
+
+  const removeCve = id => setSelected(prev => prev.filter(x => x !== id));
+  const removeAllNonValidated = () => setSelected(prev => prev.filter(x => !nonValidatedIds.includes(x)));
+
   return (
     <>
       <div className="page-card">
@@ -1593,8 +1603,14 @@ function ValidationStep({ onNext, onBack, selected, onCveClick }) {
           <div style={{ textAlign: "right" }}>
             <div className="val-issues-label">Issues Found</div>
             <div className="val-issues-count">
-              {validationRows.filter(r => selected.includes(r.id) && r.status === "Needs Review").length}
+              {nonValidatedIds.length}
             </div>
+            <button
+              onClick={removeAllNonValidated}
+              disabled={nonValidatedIds.length === 0}
+              style={{ marginTop: 6, padding: "6px 12px", borderRadius: 20, border: "1px solid #fecaca", background: nonValidatedIds.length === 0 ? "#f9fafb" : "#fef2f2", color: nonValidatedIds.length === 0 ? "#9ca3af" : "#dc2626", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: nonValidatedIds.length === 0 ? "default" : "pointer" }}>
+              Remove All Non-Validated
+            </button>
           </div>
         </div>
         <div className="val-desc">For each selected vulnerability we cross-check the AI summary, remediation, severity classification, and flag any potential hallucinations against NVD, MITRE, and vendor advisories.</div>
@@ -1629,6 +1645,14 @@ function ValidationStep({ onNext, onBack, selected, onCveClick }) {
                   : <span style={{ fontSize: 14 }}>✋</span>}
                 {row.status}
               </span>
+              {row.status === "Needs Review" && (
+                <button
+                  onClick={() => removeCve(row.id)}
+                  title="Remove this CVE from the selection"
+                  style={{ marginLeft: "auto", padding: "4px 10px", borderRadius: 20, border: "1px solid #fecaca", background: "#fff", color: "#dc2626", fontSize: 11, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+                  Remove
+                </button>
+              )}
             </div>
             <div className="val-sub">{row.desc}</div>
             <div className="val-checks">
@@ -1699,6 +1723,16 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
     sortDir
   ).map(r => r.__idx);
 
+  // Applies to whatever the search/severity/review filters currently narrow
+  // the list down to (visibleIdx), not every ticket in the wizard — so
+  // filtering down to e.g. "Critical" first, then bulk-approving, only
+  // touches those. Jumps the active form to the first newly-decided ticket
+  // so the right-hand panel doesn't keep showing a now-stale selection.
+  const bulkSetVisible = status => {
+    setSubmitted(prev => prev.map((s, i) => visibleIdx.includes(i) ? status : s));
+    if (visibleIdx.length > 0) setActiveIdx(visibleIdx[0]);
+  };
+
   return (
     <>
       <div className="page-card" style={{ padding: 0, overflow: "hidden" }}>
@@ -1723,6 +1757,22 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
             resultCount={visibleIdx.length}
             totalCount={forms.length}
           />
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button
+              onClick={() => bulkSetVisible("approved")}
+              disabled={visibleIdx.length === 0}
+              title="Approves every ticket currently matching the filters above"
+              style={{ padding: "6px 14px", borderRadius: 20, border: "none", background: visibleIdx.length === 0 ? "#e5e7eb" : "#16a34a", color: visibleIdx.length === 0 ? "#9ca3af" : "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: visibleIdx.length === 0 ? "default" : "pointer" }}>
+              Approve All ({visibleIdx.length})
+            </button>
+            <button
+              onClick={() => bulkSetVisible("rejected")}
+              disabled={visibleIdx.length === 0}
+              title="Rejects every ticket currently matching the filters above"
+              style={{ padding: "6px 14px", borderRadius: 20, border: "1px solid #fecaca", background: visibleIdx.length === 0 ? "#f9fafb" : "#fef2f2", color: visibleIdx.length === 0 ? "#9ca3af" : "#dc2626", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: visibleIdx.length === 0 ? "default" : "pointer" }}>
+              Reject All ({visibleIdx.length})
+            </button>
+          </div>
         </div>
 
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -2960,7 +3010,7 @@ export default function App() {
       case 0: return <UploadStep onNext={() => setUploadStep(1)} onBack={() => goToTab("dashboard")} file={uploadedFile} setFile={setUploadedFile} onParsed={handleScanParsed} />;
       case 1: return <AISummaryStep onNext={() => setUploadStep(2)} onBack={() => setUploadStep(0)} onCveClick={id => { setPrevStep(1); setCveId(id); }} />;
       case 2: return <SelectStep onNext={() => setUploadStep(3)} onBack={() => setUploadStep(1)} selected={selected} setSelected={setSelected} onCveClick={id => { setPrevStep(2); setCveId(id); }} />;
-      case 3: return <ValidationStep onNext={() => setUploadStep(4)} onBack={() => setUploadStep(2)} selected={selected} onCveClick={id => { setPrevStep(3); setCveId(id); }} />;
+      case 3: return <ValidationStep onNext={() => setUploadStep(4)} onBack={() => setUploadStep(2)} selected={selected} setSelected={setSelected} onCveClick={id => { setPrevStep(3); setCveId(id); }} />;
       case 4: return <GenerateTicketStep onNext={(approved) => { setSubmittedTickets(approved); setUploadStep(5); }} onBack={() => setUploadStep(3)} selected={selected} />;
       case 5: return <ReviewSendStep onNext={() => goToTab("tickets")} onBack={() => setUploadStep(4)} selected={selected} approvedTickets={submittedTickets} onSubmit={(newTickets) => setLiveTickets(prev => [...prev, ...newTickets])} />;
       default: return null;
