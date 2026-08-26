@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 
 import tenable_client
 from ai_analysis import OllamaVulnerabilityAnalyzer
@@ -14,7 +15,7 @@ from scanners.utils import dedupe_by_cve, sort_by_severity
 from jira_integration import jira_bp
 from registry_credentials import registry_bp, get_credentials as get_registry_credentials
 from auth import auth_bp
-from business_context import business_context_bp
+from business_context import business_context_bp, get_business_context
 from tickets import tickets_bp
 from scans import scans_bp, record_scan
 from dashboard import dashboard_bp
@@ -44,6 +45,18 @@ app.register_blueprint(scans_bp)
 app.register_blueprint(dashboard_bp)
 
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB safety limit for uploaded scan files
+
+# /api/analyze calls out to Ollama once per finding (more if a finding needs
+# retries — see MAX_RETRIES in ai_analysis.py), and each call can take
+# several seconds. Doing that in a plain for-loop meant a 15-finding scan
+# took 15x as long as a single call, made worse now that the frontend
+# blocks its "Next" button on this request finishing (see UploadStep in
+# App.jsx) instead of racing ahead with placeholder data. Running findings
+# through a small thread pool instead lets Ollama work on several requests
+# in parallel - keep this modest, since a single local Ollama instance
+# only has so much throughput before concurrent requests just start
+# queuing behind each other anyway.
+AI_ANALYSIS_CONCURRENCY = int(os.getenv("AI_ANALYSIS_CONCURRENCY", "4"))
 
 # Built lazily on first use rather than at import time. Ollama needs no
 # API key, but the server might not be running yet — /api/analyze and
@@ -239,12 +252,24 @@ def trigger_scan():
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     """
-    Runs each vulnerability through Claude and merges the result back in.
+    Runs each vulnerability through the AI analyzer and merges the result
+    back in.
 
     Body: {"vulnerabilities": [ ...normalized vuln objects from /api/upload-scan or /api/scan... ]}
 
-    Returns the same list with why/fixes/confidence/priority_tier/ai_generated
-    added to each entry - this is what the frontend's CveDetailStep reads.
+    Returns the same list with why/fixes/confidence/priority_tier/
+    ai_generated/business_priority_score added to each entry, ORDERED by
+    business_priority_score (most important first) rather than raw CVSS -
+    this is what the frontend's AI Summary/Select steps render by default.
+
+    If the signed-in user has completed the business-context survey (see
+    business_context.py), that record is loaded here by session and fed
+    into every analyze() call so both the AI's write-up and the ordering
+    reflect real-world business impact (internet-facing? regulated data?
+    a life-safety system?) instead of CVSS alone. Anonymous sessions, or
+    accounts that haven't filled out the survey yet, still get a sensible
+    result - compute_business_priority_score() degrades to a CVSS/severity
+    score in that case, same ordering as before.
     """
     body = request.get_json(force=True, silent=True) or {}
     vulnerabilities = body.get("vulnerabilities")
@@ -256,15 +281,28 @@ def analyze():
     except EnvironmentError as e:
         return jsonify({"error": str(e)}), 503
 
-    analyzed = []
-    for vuln in vulnerabilities:
-        if not isinstance(vuln, dict):
-            continue
-        ai_result = analyzer.analyze(vuln)
-        analyzed.append({**vuln, **ai_result})
+    business_context = get_business_context(session.get("user_id"))
+
+    # Only real dicts get analyzed (mirrors the old loop's skip-if-not-dict
+    # guard).
+    dict_indices = [i for i, v in enumerate(vulnerabilities) if isinstance(v, dict)]
+    results = []
+
+    def _analyze_one(pos):
+        vuln = vulnerabilities[dict_indices[pos]]
+        ai_result = analyzer.analyze(vuln, business_context=business_context)
+        return {**vuln, **ai_result}
+
+    if dict_indices:
+        with ThreadPoolExecutor(max_workers=min(AI_ANALYSIS_CONCURRENCY, len(dict_indices))) as pool:
+            results = list(pool.map(_analyze_one, range(len(dict_indices))))
+
+    analyzed = results
+    analyzed.sort(key=lambda v: v.get("business_priority_score") or 0, reverse=True)
 
     return jsonify({
         "status": "analyzed",
+        "businessContextApplied": business_context is not None,
         "vulnerabilities": analyzed,
     })
 

@@ -124,6 +124,47 @@ def _require_login():
     return session.get("user_id")
 
 
+def get_business_context(user_id):
+    """Fetches the saved business-context row for a user_id and returns it
+    as a plain dict (same shape as GET /api/business-context/me's payload),
+    or None if the user hasn't completed the survey (or user_id is falsy).
+
+    This is the shared lookup used by anything that needs to factor business
+    context into its logic without going through the HTTP endpoint — right
+    now that's /api/analyze in scanner.py, which uses it to weight AI
+    vulnerability analysis and priority ordering by business impact instead
+    of CVSS alone.
+    """
+    if not user_id:
+        return None
+
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM business_context WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "sector": row["sector"],
+        "sectorOther": row["sector_other"],
+        "dataSensitivity": json.loads(row["data_sensitivity"]),
+        "availabilityImpact": row["availability_impact"],
+        "criticalityTier": row["criticality_tier"],
+        "internetFacing": row["internet_facing"],
+        "complianceScope": json.loads(row["compliance_scope"]),
+        "airGapped": bool(row["air_gapped"]),
+        "airGappedDetails": row["air_gapped_details"],
+        "hasSecurityTeam": None
+        if row["has_security_team"] is None
+        else bool(row["has_security_team"]),
+    }
+
+
 def _validate(body):
     """Mirrors the frontend's form validation. Returns an error string, or
     None if everything checks out."""
@@ -241,37 +282,10 @@ def submit():
 @business_context_bp.route("/me", methods=["GET"])
 def me():
     user_id = _require_login()
-    if not user_id:
+    context = get_business_context(user_id)
+    if context is None:
         return jsonify({"completed": False})
-
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT * FROM business_context WHERE user_id = ?", (user_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-
-    if not row:
-        return jsonify({"completed": False})
-
-    return jsonify(
-        {
-            "completed": True,
-            "sector": row["sector"],
-            "sectorOther": row["sector_other"],
-            "dataSensitivity": json.loads(row["data_sensitivity"]),
-            "availabilityImpact": row["availability_impact"],
-            "criticalityTier": row["criticality_tier"],
-            "internetFacing": row["internet_facing"],
-            "complianceScope": json.loads(row["compliance_scope"]),
-            "airGapped": bool(row["air_gapped"]),
-            "airGappedDetails": row["air_gapped_details"],
-            "hasSecurityTeam": None
-            if row["has_security_team"] is None
-            else bool(row["has_security_team"]),
-        }
-    )
+    return jsonify({"completed": True, **context})
 
 
 init_business_context_db()

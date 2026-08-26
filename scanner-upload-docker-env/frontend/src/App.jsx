@@ -64,10 +64,10 @@ let lastVulnerabilities = [];
 // allRisks, validationRows), replacing the demo placeholder data above.
 //
 // Each entry in `vulnerabilities` may already carry real AI fields (why,
-// fixes, confidence, priority_tier, ai_generated) if it went through
-// POST /api/analyze first — see runAiAnalysis() below. If those fields
-// aren't present (analysis skipped or failed), fall back to the same
-// heuristic placeholders as before so the UI never breaks.
+// business_impact, fixes, confidence, priority_tier, ai_generated) if it
+// went through POST /api/analyze first — see runAiAnalysis() below. If
+// those fields aren't present (analysis skipped or failed), fall back to
+// the same heuristic placeholders as before so the UI never breaks.
 function applyScanResults(vulnerabilities) {
   const list = Array.isArray(vulnerabilities) ? vulnerabilities : [];
   lastVulnerabilities = list;
@@ -78,15 +78,17 @@ function applyScanResults(vulnerabilities) {
     severity: v.severity || "Unknown",
     cvss: typeof v.cvss === "number" ? v.cvss : 0,
     asset: v.asset || v.package || "unknown",
+    businessPriorityScore: typeof v.business_priority_score === "number" ? v.business_priority_score : null,
   }));
 
   cveDetails = Object.fromEntries(list.map(v => {
     const id = v.cve || v.title;
     const hasAiResult = v.ai_generated !== undefined; // set by /api/analyze on every entry it touches
 
-    let why, fixes, confidence;
+    let why, businessImpact, fixes, confidence;
     if (hasAiResult) {
       why = v.why || "No explanation was returned for this finding.";
+      businessImpact = v.business_impact || "";
       fixes = Array.isArray(v.fixes) && v.fixes.length ? v.fixes : ["Review the vendor advisory and apply the recommended patch."];
       confidence = typeof v.confidence === "number" ? v.confidence : 50;
     } else {
@@ -101,6 +103,7 @@ function applyScanResults(vulnerabilities) {
       fixes.push(`Review the vendor advisory for ${id}`);
       fixes.push("Re-scan the asset after remediation to confirm the fix");
       why = v.description || "No description was provided by the scanner for this finding.";
+      businessImpact = "";
       confidence = typeof v.cvss === "number" && v.description ? 95 : 65;
     }
 
@@ -110,13 +113,24 @@ function applyScanResults(vulnerabilities) {
       severity: v.severity || "Unknown",
       title: v.title || id,
       why,
+      businessImpact,
       fixes,
       priorityTier: v.priority_tier || null,
       aiGenerated: !!v.ai_generated,
+      businessPriorityScore: typeof v.business_priority_score === "number" ? v.business_priority_score : null,
     }];
   }));
 
-  allRisks = Object.entries(cveDetails).map(([id, d]) => ({ id, cvss: d.cvss, severity: d.severity, title: d.title }));
+  // Preserves the order the backend returned the list in (business-impact
+  // order when the survey's been completed, CVSS/severity order otherwise
+  // — see /api/analyze), rather than re-deriving an order from the object
+  // map, whose key order isn't guaranteed to match for non-string-integer
+  // keys like CVE IDs.
+  allRisks = list.map(v => {
+    const id = v.cve || v.title;
+    const d = cveDetails[id];
+    return { id, cvss: d.cvss, severity: d.severity, title: d.title, businessPriorityScore: d.businessPriorityScore };
+  });
 
   // Flag anything missing a CVSS score or description as needing a human
   // look; if real AI analysis ran and came back with low confidence,
@@ -136,24 +150,37 @@ function applyScanResults(vulnerabilities) {
   });
 }
 
+// Set by runAiAnalysis() from the last /api/analyze response so the UI can
+// tell the user whether ordering/analysis actually used their business
+// context (vs. falling back to CVSS-only because they haven't completed
+// the survey, or aren't signed in).
+let lastBusinessContextApplied = false;
+
 // Calls POST /api/analyze with the vulnerabilities parsed from either
-// upload path, and returns the same list with AI fields merged in.
-// On any failure (backend unreachable, ANTHROPIC_API_KEY missing, etc.)
-// falls back to returning the list unchanged — applyScanResults() then
-// uses its heuristic placeholders instead of hard-failing the wizard.
+// upload path, and returns the same list with AI fields merged in
+// (including business_priority_score) — the backend also reorders the
+// list by business_priority_score before returning it, so this is already
+// business-impact-ordered, not just CVSS-ordered, whenever the signed-in
+// user has completed the business-context survey.
+// On any failure (backend unreachable, Ollama not running, etc.) falls
+// back to returning the list unchanged — applyScanResults() then uses its
+// heuristic placeholders instead of hard-failing the wizard.
 async function runAiAnalysis(vulnerabilities) {
   if (!Array.isArray(vulnerabilities) || vulnerabilities.length === 0) return vulnerabilities;
   try {
     const res = await fetch(`${API_BASE}/api/analyze`, {
       method: "POST",
+      credentials: "include", // needed so the backend can look up the signed-in user's business context
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ vulnerabilities }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "AI analysis failed");
+    lastBusinessContextApplied = !!data.businessContextApplied;
     return data.vulnerabilities || vulnerabilities;
   } catch (err) {
     console.warn("AI analysis unavailable, showing raw scan results:", err.message);
+    lastBusinessContextApplied = false;
     return vulnerabilities;
   }
 }
@@ -217,6 +244,8 @@ const css = `
   .uploaded-file { display:flex; align-items:center; gap:10px; padding:12px 16px; background:#f9fafb; border-radius:10px; border:1px solid #e5e7eb; }
   .uploaded-name { font-size:13px; font-weight:500; color:#374151; }
   .uploaded-size { font-size:12px; color:#9ca3af; }
+  .spinner { width:12px; height:12px; border-radius:50%; border:2px solid rgba(124,58,237,.25); border-top-color:#7c3aed; display:inline-block; animation:spin .7s linear infinite; flex-shrink:0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ai analysis */
   .ai-stats { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:16px; }
@@ -898,6 +927,12 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
   const [errorMsg, setErrorMsg] = useState("");
   const [foundCount, setFoundCount] = useState(0);
   const [tenableMatchCount, setTenableMatchCount] = useState(0);
+  // True from the moment the raw scan results land until /api/analyze
+  // (business-context-aware AI analysis) finishes. The Next button stays
+  // disabled the whole time so nobody can click into a CVE before its real
+  // priority/business_priority_score exists — see the CveDetailStep race
+  // this was added to close.
+  const [analyzing, setAnalyzing] = useState(false);
 
   const uploadToServer = async f => {
     setStatus("uploading");
@@ -919,9 +954,16 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
       setStatus("success");
 
       // ...then swap in real AI analysis once it comes back (falls back to
-      // placeholders inside applyScanResults if /api/analyze fails).
-      const analyzed = await runAiAnalysis(vulnerabilities);
-      onParsed(analyzed);
+      // placeholders inside applyScanResults if /api/analyze fails). Next
+      // stays disabled for the duration so nobody can click into a CVE
+      // while it's still showing pre-analysis placeholder data.
+      setAnalyzing(true);
+      try {
+        const analyzed = await runAiAnalysis(vulnerabilities);
+        onParsed(analyzed);
+      } finally {
+        setAnalyzing(false);
+      }
     } catch (err) {
       setStatus("error");
       setErrorMsg(err.message || "Could not reach the scanner service. Is the backend running?");
@@ -960,6 +1002,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
   const [liveError, setLiveError] = useState("");
   const [liveFoundCount, setLiveFoundCount] = useState(0);
   const [liveTenableMatchCount, setLiveTenableMatchCount] = useState(0);
+  const [liveAnalyzing, setLiveAnalyzing] = useState(false); // same purpose as `analyzing` above, for the live-scan path
 
   useEffect(() => {
     fetch(`${API_BASE}/api/scanners`)
@@ -999,9 +1042,15 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
       setLiveStatus("success");
 
       // ...then swap in real AI analysis once it comes back, same as the
-      // upload path — keeps both entry points behaving consistently.
-      const analyzed = await runAiAnalysis(vulnerabilities);
-      onParsed(analyzed);
+      // upload path — keeps both entry points behaving consistently, Next
+      // disabled until it's done.
+      setLiveAnalyzing(true);
+      try {
+        const analyzed = await runAiAnalysis(vulnerabilities);
+        onParsed(analyzed);
+      } finally {
+        setLiveAnalyzing(false);
+      }
     } catch (err) {
       setLiveStatus("error");
       setLiveError(err.message || "Could not reach the scanner service. Is the backend running?");
@@ -1077,7 +1126,13 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
                 {status === "uploading" && (
                   <div className="dropzone-sub">Parsing scan file and checking CVEs against Tenable.io…</div>
                 )}
-                {status === "success" && (
+                {status === "success" && analyzing && (
+                  <div className="dropzone-sub" style={{ color: "#7c3aed", display: "flex", alignItems: "center", gap: 8 }}>
+                    <span className="spinner" aria-hidden="true" />
+                    Running AI analysis and weighting results by your business context…
+                  </div>
+                )}
+                {status === "success" && !analyzing && (
                   <div className="dropzone-sub" style={{ color: "#16a34a" }}>
                     {foundCount} vulnerabilit{foundCount === 1 ? "y" : "ies"} found
                     {tenableMatchCount > 0 && ` · ${tenableMatchCount} also confirmed in your Tenable.io inventory`}.
@@ -1190,7 +1245,13 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
             {liveStatus === "scanning" && (
               <div className="dropzone-sub">Running {scannerName} against {target}… this can take a while for larger targets.</div>
             )}
-            {liveStatus === "success" && (
+            {liveStatus === "success" && liveAnalyzing && (
+              <div className="dropzone-sub" style={{ color: "#7c3aed", display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="spinner" aria-hidden="true" />
+                Running AI analysis and weighting results by your business context…
+              </div>
+            )}
+            {liveStatus === "success" && !liveAnalyzing && (
               <div className="dropzone-sub" style={{ color: "#16a34a" }}>
                 {liveFoundCount} vulnerabilit{liveFoundCount === 1 ? "y" : "ies"} found
                 {liveTenableMatchCount > 0 && ` · ${liveTenableMatchCount} also confirmed in your Tenable.io inventory`}.
@@ -1214,20 +1275,27 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
         step={0}
         onBack={onBack}
         onNext={onNext}
-        disableNext={mode === "upload" ? (!file || status !== "success") : liveStatus !== "success"}
+        nextLabel={(mode === "upload" ? analyzing : liveAnalyzing) ? "Analyzing…" : "Next"}
+        disableNext={mode === "upload" ? (!file || status !== "success" || analyzing) : (liveStatus !== "success" || liveAnalyzing)}
       />
     </>
   );
 }
 
 //Upload step 2: AI Summary
-const AI_RISK_SORT_FIELDS = { "None": null, "CVE": "id", "Severity": "severity", "CVSS": "cvss" };
+// "None" leaves the list in the order the backend returned it in, which is
+// already business_priority_score order when the signed-in user has
+// completed the business-context survey (falls back to CVSS/severity order
+// otherwise — see /api/analyze). "Business Priority" is here as an explicit,
+// user-toggleable option too since AI analysis can reorder things after the
+// initial CVSS-sorted upload result renders.
+const AI_RISK_SORT_FIELDS = { "None": null, "Business Priority": "businessPriorityScore", "CVE": "id", "Severity": "severity", "CVSS": "cvss" };
 
 function AISummaryStep({ onNext, onBack, onCveClick }) {
   const [showAll, setShowAll] = useState(false);
   const [riskSeverityFilter, setRiskSeverityFilter] = useState("All");
   const [riskSortBy, setRiskSortBy] = useState("None");
-  const [riskSortDir, setRiskSortDir] = useState("asc");
+  const [riskSortDir, setRiskSortDir] = useState("desc");
 
   const filteredRisks = sortRows(
     allRisks.filter(r => riskSeverityFilter === "All" || r.severity === riskSeverityFilter),
@@ -1263,8 +1331,14 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
           );
         })()}
 
+        {!lastBusinessContextApplied && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, fontSize: 12, color: "#7c3aed", background: "#f5f3ff", borderRadius: 10, padding: "10px 14px", marginBottom: 16 }}>
+            <span>These results are ranked by CVSS only. Complete your business profile so we can rank them by business impact instead.</span>
+          </div>
+        )}
+
         <div className="top-risks">
-          <div className="top-risks-title">Risks</div>
+          <div className="top-risks-title">{lastBusinessContextApplied ? "Risks, ranked by business impact" : "Risks"}</div>
           <FilterBar
             groups={[
               { options: ["All", "Critical", "High", "Medium", "Low"], value: riskSeverityFilter, onChange: setRiskSeverityFilter },
@@ -1349,7 +1423,7 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
         <div className="page-title">{cveId}</div>
         <div className="page-sub">Analyse results with AI-powered insights</div>
 
-        <div className="cve-scores">
+        <div className="cve-scores" style={d.businessPriorityScore != null ? { gridTemplateColumns: "1fr 1fr 1fr" } : undefined}>
           <div className="cve-score-card">
             <div className="cve-score-label">CVSS Score</div>
             <div className="cve-score-val" style={{ color: cvssColor }}>{d.cvss}</div>
@@ -1359,12 +1433,26 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
             <div className="cve-score-val" style={{ color: confColor }}>{d.confidence}%</div>
             <div className="cve-score-sub">Validated against NVD & vendor advisory</div>
           </div>
+          {d.businessPriorityScore != null && (
+            <div className="cve-score-card">
+              <div className="cve-score-label">Business Priority</div>
+              <div className="cve-score-val" style={{ color: "#7c3aed" }}>{d.businessPriorityScore}</div>
+              <div className="cve-score-sub">CVSS weighted by your business profile</div>
+            </div>
+          )}
         </div>
 
         <div className="cve-section">
           <div className="cve-section-title">Why This Matters</div>
           <div className="cve-section-text">{d.why}</div>
         </div>
+
+        {d.businessImpact && (
+          <div className="cve-section" style={{ background: "#f5f3ff", borderLeft: "3px solid #7c3aed" }}>
+            <div className="cve-section-title" style={{ color: "#7c3aed" }}>Business Impact</div>
+            <div className="cve-section-text">{d.businessImpact}</div>
+          </div>
+        )}
 
         <div className="cve-section">
           <div className="cve-section-title">Suggested Fix</div>
@@ -1482,7 +1570,7 @@ function sortRows(rows, field, dir = "asc") {
 
 // Maps the human-readable sort labels shown in the dropdown to the
 // underlying row field to sort by for that page's data shape.
-const SELECT_SORT_FIELDS = { "None": null, "CVE": "id", "Title": "title", "Severity": "severity", "CVSS": "cvss", "Asset": "asset" };
+const SELECT_SORT_FIELDS = { "None": null, "Business Priority": "businessPriorityScore", "CVE": "id", "Title": "title", "Severity": "severity", "CVSS": "cvss", "Asset": "asset" };
 
 function SelectStep({ onNext, onBack, selected, setSelected, onCveClick }) {
   const [search, setSearch] = useState("");
