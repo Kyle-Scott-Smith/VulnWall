@@ -185,6 +185,32 @@ async function runAiAnalysis(vulnerabilities) {
   }
 }
 
+// Sends the current scan's vulnerabilities to POST /api/export and triggers
+// a browser download of the returned .xlsx file. Used by the "Export to
+// Excel" button on the AI Summary step. Throws on failure so the caller can
+// show an error state — never silently does nothing.
+async function exportVulnerabilitiesToExcel(vulnerabilities) {
+  const res = await fetch(`${API_BASE}/api/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ vulnerabilities }),
+  });
+  if (!res.ok) {
+    let message = "Export failed";
+    try { message = (await res.json()).error || message; } catch { /* response wasn't JSON */ }
+    throw new Error(message);
+  }
+  const blob = await res.blob();
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `vulnerability-report-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 //styling
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
@@ -1296,6 +1322,22 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
   const [riskSeverityFilter, setRiskSeverityFilter] = useState("All");
   const [riskSortBy, setRiskSortBy] = useState("None");
   const [riskSortDir, setRiskSortDir] = useState("desc");
+  // exportState: idle | exporting | error — drives the small status text
+  // next to the Export button.
+  const [exportState, setExportState] = useState("idle");
+  const [exportError, setExportError] = useState("");
+
+  const handleExport = async () => {
+    setExportState("exporting");
+    setExportError("");
+    try {
+      await exportVulnerabilitiesToExcel(lastVulnerabilities);
+      setExportState("idle");
+    } catch (err) {
+      setExportState("error");
+      setExportError(err.message || "Export failed");
+    }
+  };
 
   const filteredRisks = sortRows(
     allRisks.filter(r => riskSeverityFilter === "All" || r.severity === riskSeverityFilter),
@@ -1306,8 +1348,41 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
   return (
     <>
       <div className="page-card">
-        <div className="page-title">AI Analysis</div>
-        <div className="page-sub">Analyze results with AI-powered insights</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div>
+            <div className="page-title">AI Analysis</div>
+            <div className="page-sub" style={{ marginBottom: 0 }}>Analyze results with AI-powered insights</div>
+          </div>
+          <div style={{ textAlign: "right", flexShrink: 0 }}>
+            <button
+              onClick={handleExport}
+              disabled={exportState === "exporting" || allRisks.length === 0}
+              title={allRisks.length === 0 ? "Nothing to export yet" : "Download this scan's findings as an Excel file"}
+              style={{
+                padding: "8px 16px",
+                borderRadius: 20,
+                border: "1px solid #e5e7eb",
+                background: "#fff",
+                color: "#374151",
+                fontSize: 13,
+                fontWeight: 600,
+                fontFamily: "DM Sans, sans-serif",
+                cursor: (exportState === "exporting" || allRisks.length === 0) ? "default" : "pointer",
+                opacity: (exportState === "exporting" || allRisks.length === 0) ? 0.6 : 1,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              {exportState === "exporting" && <span className="spinner" aria-hidden="true" />}
+              {exportState === "exporting" ? "Exporting…" : "Export to Excel"}
+            </button>
+            {exportState === "error" && (
+              <div style={{ fontSize: 11, color: "#dc2626", marginTop: 6, maxWidth: 220 }}>{exportError}</div>
+            )}
+          </div>
+        </div>
+        <div style={{ marginBottom: 20 }} />
 
         {(() => {
           const total = allRisks.length;

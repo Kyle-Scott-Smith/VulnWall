@@ -1,10 +1,16 @@
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, send_file
 from flask_cors import CORS
 import json
 import logging
 import os
 import secrets
+from io import BytesIO
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 
 import tenable_client
 from ai_analysis import OllamaVulnerabilityAnalyzer
@@ -24,16 +30,8 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Needed for session cookies (Jira OAuth state, registry credential lookup,
-# and now the logged-in user id set by auth.py on signup/login). Falls back
-# to a random key per process start if unset, which is fine for local demo
-# use; set FLASK_SECRET_KEY explicitly for anything longer-lived than a
-# single dev session — otherwise everyone gets signed out on every restart.
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 
-# Allow the React dev server (and any other origin) to call this API during
-# local development. Tighten this to your actual frontend origin in production,
-# e.g. CORS(app, origins=["https://your-frontend-domain"]).
 CORS(app, supports_credentials=True)
 
 app.register_blueprint(jira_bp)
@@ -44,24 +42,10 @@ app.register_blueprint(tickets_bp)
 app.register_blueprint(scans_bp)
 app.register_blueprint(dashboard_bp)
 
-MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB safety limit for uploaded scan files
+MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 
-# /api/analyze calls out to Ollama once per finding (more if a finding needs
-# retries — see MAX_RETRIES in ai_analysis.py), and each call can take
-# several seconds. Doing that in a plain for-loop meant a 15-finding scan
-# took 15x as long as a single call, made worse now that the frontend
-# blocks its "Next" button on this request finishing (see UploadStep in
-# App.jsx) instead of racing ahead with placeholder data. Running findings
-# through a small thread pool instead lets Ollama work on several requests
-# in parallel - keep this modest, since a single local Ollama instance
-# only has so much throughput before concurrent requests just start
-# queuing behind each other anyway.
 AI_ANALYSIS_CONCURRENCY = int(os.getenv("AI_ANALYSIS_CONCURRENCY", "4"))
 
-# Built lazily on first use rather than at import time. Ollama needs no
-# API key, but the server might not be running yet — /api/analyze and
-# /api/chat catch that per-request and return a clear error instead of
-# crashing the whole backend.
 _analyzer = None
 _chatbot = None
 
@@ -81,11 +65,6 @@ def _get_chatbot():
 
 
 def _cross_reference_tenable(vulnerabilities):
-    """Best-effort: check each CVE against the org's Tenable.io asset
-    inventory and attach tenable_exposure to each finding. Silently skipped
-    if Tenable keys aren't configured, or if the lookup fails for any reason
-    - scanning should never hard-fail just because this enrichment step did.
-    Applied regardless of which scanner produced the findings."""
     try:
         tio = tenable_client.get_client()
         cve_ids = [v["cve"] for v in vulnerabilities if v.get("cve")]
@@ -100,10 +79,6 @@ def _cross_reference_tenable(vulnerabilities):
 
 
 def _finalize(vulnerabilities):
-    """Shared post-processing applied no matter which scanner produced the
-    findings or whether they came from an upload or a live scan: collapse
-    duplicate CVEs, cross-reference against Tenable's asset inventory, then
-    sort by severity/CVSS."""
     vulnerabilities = dedupe_by_cve(vulnerabilities)
     vulnerabilities = _cross_reference_tenable(vulnerabilities)
     vulnerabilities = sort_by_severity(vulnerabilities)
@@ -117,12 +92,6 @@ def health():
 
 @app.route("/api/ollama-status", methods=["GET"])
 def ollama_status():
-    """
-    Diagnostic endpoint: what model will /api/analyze and /api/chat
-    actually use right now, and what's available on the Ollama server.
-    Useful for exactly the kind of "model not found" confusion this had
-    before — check this instead of guessing at a model name.
-    """
     import ollama_client
     requested = ollama_client.OLLAMA_MODEL
     try:
@@ -140,7 +109,6 @@ def ollama_status():
 
 @app.route("/api/scanners", methods=["GET"])
 def list_scanners():
-    """Lets the frontend build a scanner picker without hardcoding names."""
     result = {}
     for name, scanner in SCANNERS.items():
         info = {"supportsLiveScan": scanner.supports_run()}
@@ -180,10 +148,6 @@ def upload_scan():
 
     vulnerabilities = _finalize(scanner.parse(data))
 
-    # Best-effort dashboard history — only recorded for a signed-in account
-    # (see scans.py); an anonymous upload still works, it just won't show
-    # up on any account's Security Overview since there's no account to
-    # attach it to.
     record_scan(session.get("user_id"), scanner.name, "upload", file.filename, vulnerabilities)
 
     return jsonify({
@@ -196,10 +160,6 @@ def upload_scan():
 
 @app.route("/api/scan", methods=["POST"])
 def trigger_scan():
-    """Trigger a live scan instead of uploading a pre-generated report.
-    Body: {"scanner": "trivy", "target": "myapp:latest", ...extra options}
-    Extra JSON fields are passed straight through to that scanner's run()
-    (e.g. Trivy accepts scan_type/mode; see scanners/trivy.py)."""
     body = request.get_json(silent=True) or {}
     scanner_name = body.get("scanner")
     target = body.get("target")
@@ -216,11 +176,6 @@ def trigger_scan():
 
     extra_kwargs = {k: v for k, v in body.items() if k not in ("scanner", "target", "usePrivateRegistry")}
 
-    # "usePrivateRegistry" is a plain bool from the frontend — never actual
-    # credentials. The real username/password come from whatever the user
-    # connected via the Profile page's "Connect registry" form (see
-    # registry_credentials.py), looked up here by browser session so
-    # nothing sensitive travels in this request body.
     if scanner_name == "trivy" and body.get("usePrivateRegistry"):
         reg_url, reg_username, reg_password = get_registry_credentials()
         if not reg_url:
@@ -238,7 +193,6 @@ def trigger_scan():
 
     vulnerabilities = _finalize(scanner.parse(raw))
 
-    # Same dashboard-history recording as the upload path above.
     record_scan(session.get("user_id"), scanner.name, "live", target, vulnerabilities)
 
     return jsonify({
@@ -251,26 +205,6 @@ def trigger_scan():
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
-    """
-    Runs each vulnerability through the AI analyzer and merges the result
-    back in.
-
-    Body: {"vulnerabilities": [ ...normalized vuln objects from /api/upload-scan or /api/scan... ]}
-
-    Returns the same list with why/fixes/confidence/priority_tier/
-    ai_generated/business_priority_score added to each entry, ORDERED by
-    business_priority_score (most important first) rather than raw CVSS -
-    this is what the frontend's AI Summary/Select steps render by default.
-
-    If the signed-in user has completed the business-context survey (see
-    business_context.py), that record is loaded here by session and fed
-    into every analyze() call so both the AI's write-up and the ordering
-    reflect real-world business impact (internet-facing? regulated data?
-    a life-safety system?) instead of CVSS alone. Anonymous sessions, or
-    accounts that haven't filled out the survey yet, still get a sensible
-    result - compute_business_priority_score() degrades to a CVSS/severity
-    score in that case, same ordering as before.
-    """
     body = request.get_json(force=True, silent=True) or {}
     vulnerabilities = body.get("vulnerabilities")
     if not isinstance(vulnerabilities, list):
@@ -283,8 +217,6 @@ def analyze():
 
     business_context = get_business_context(session.get("user_id"))
 
-    # Only real dicts get analyzed (mirrors the old loop's skip-if-not-dict
-    # guard).
     dict_indices = [i for i, v in enumerate(vulnerabilities) if isinstance(v, dict)]
     results = []
 
@@ -309,15 +241,6 @@ def analyze():
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
-    """
-    Scan-scoped chatbot. Body:
-      {
-        "question": "which CVEs affect host X",
-        "vulnerabilities": [ ...current scan's findings... ],
-        "history": [ {"role": "user"|"assistant", "content": "..."}, ... ]  # optional
-      }
-    Returns {"answer": "..."}.
-    """
     body = request.get_json(force=True, silent=True) or {}
     question = (body.get("question") or "").strip()
     vulnerabilities = body.get("vulnerabilities")
@@ -344,10 +267,112 @@ def chat():
     return jsonify({"answer": answer})
 
 
+# Severity -> row highlight color, same palette as the frontend's severity
+# pills (sev-critical/sev-high/sev-medium in App.jsx's css) so the exported
+# file visually matches what the person already saw on screen.
+_SEVERITY_FILL = {
+    "Critical": "FEE2E2",
+    "High": "FFEDD5",
+    "Medium": "FEF9C3",
+    "Low": "DCFCE7",
+}
+
+_EXPORT_COLUMNS = [
+    ("CVE", "cve", 16),
+    ("Title", "title", 42),
+    ("Severity", "severity", 11),
+    ("CVSS", "cvss", 8),
+    ("Business Priority", "business_priority_score", 14),
+    ("Asset", "asset", 22),
+    ("Package", "package", 18),
+    ("Installed Version", "installedVersion", 16),
+    ("Why It Matters", "why", 50),
+    ("Business Impact", "business_impact", 40),
+    ("Suggested Fixes", "fixes", 50),
+    ("AI Confidence (%)", "confidence", 14),
+    ("Tenable Exposure", "tenable_exposure", 20),
+    ("Source", "source", 12),
+    ("Published Date", "publishedDate", 16),
+]
+
+
+def _export_cell_value(v, field):
+    """Most fields map straight across; a handful need reshaping into
+    something a spreadsheet cell can actually hold (lists -> joined text,
+    the nested tenable_exposure object -> a short human-readable summary)."""
+    if field == "fixes":
+        fixes = v.get("fixes")
+        return "; ".join(fixes) if isinstance(fixes, list) else (fixes or "")
+    if field == "tenable_exposure":
+        exposure = v.get("tenable_exposure")
+        if not isinstance(exposure, dict):
+            return ""
+        return "Confirmed in inventory" if exposure.get("matched") else "Not found in inventory"
+    value = v.get(field)
+    if isinstance(value, (list, dict)):
+        return json.dumps(value)
+    return value if value is not None else ""
+
+
+@app.route("/api/export", methods=["POST"])
+def export_report():
+    """
+    Exports the current scan's vulnerabilities as a formatted .xlsx file —
+    useful for anyone who needs the findings outside the app itself (an
+    auditor, a manager, a council member), where Excel's filter/sort/pivot
+    beats reading a static list.
+
+    Body: {"vulnerabilities": [ ...normalized vuln objects, same shape as
+    /api/upload-scan / /api/scan / /api/analyze return... ]}
+
+    Works with or without AI analysis having run — columns that depend on
+    it (Business Priority, Why It Matters, Business Impact, Suggested
+    Fixes, AI Confidence) just come back blank for rows that don't have it.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    vulnerabilities = body.get("vulnerabilities")
+    if not isinstance(vulnerabilities, list):
+        return jsonify({"error": "Expected a 'vulnerabilities' array"}), 400
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Vulnerabilities"
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    for col_idx, (label, _field, width) in enumerate(_EXPORT_COLUMNS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=label)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(vertical="center")
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    for v in vulnerabilities:
+        if not isinstance(v, dict):
+            continue
+        row_idx = ws.max_row + 1
+        for col_idx, (_label, field, _width) in enumerate(_EXPORT_COLUMNS, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=_export_cell_value(v, field))
+            cell.alignment = Alignment(vertical="top", wrap_text=field in ("why", "business_impact", "fixes", "title"))
+        fill_color = _SEVERITY_FILL.get(v.get("severity"))
+        if fill_color:
+            ws.cell(row=row_idx, column=3).fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(_EXPORT_COLUMNS))}{ws.max_row}"
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    filename = f"vulnerability-report-{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
 if __name__ == "__main__":
-    # host=0.0.0.0 so the Flask dev server is reachable from outside the
-    # container (from the host machine, or from the frontend container).
-    # debug=True keeps the Werkzeug auto-reloader on, so editing scanner.py
-    # or any scanners/*.py file picks up changes without a rebuild (this
-    # folder is bind-mounted — see docker-compose.yml).
     app.run(host="0.0.0.0", port=5000, debug=True)
