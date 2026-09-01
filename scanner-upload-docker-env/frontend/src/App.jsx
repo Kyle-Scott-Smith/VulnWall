@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 
 // Base URL for the scanner-upload backend (Flask). Update this if the
 // backend runs somewhere other than localhost:5000 (e.g. in docker-compose).
@@ -445,10 +445,10 @@ function Nav({ activeTab, setActiveTab }) {
   return (
     <nav className="nav">
       <div className="nav-links">
-        {["dashboard", "upload-scan", "tickets"].map(tab => (
+        {["dashboard", "upload-scan", "history", "tickets"].map(tab => (
           <button key={tab} className={`nav-btn ${activeTab === tab ? "active" : ""}`} onClick={() => setActiveTab(tab)}>
             <span>✦</span>
-            {tab === "dashboard" ? "Dashboard" : tab === "upload-scan" ? "Upload Scan" : "Tickets"}
+            {tab === "dashboard" ? "Dashboard" : tab === "upload-scan" ? "Upload Scan" : tab === "history" ? "Scan History" : "Tickets"}
           </button>
         ))}
       </div>
@@ -2259,6 +2259,16 @@ function TicketList({ tickets: initialTickets }) {
   // next to the Sync button so it's clear something actually happened
   // (or didn't) rather than the button just silently doing nothing.
   const [syncState, setSyncState] = useState("idle");
+  // Tracks whether the FIRST sync (the one that runs automatically on
+  // mount) has finished. Ticket status here is only as fresh as the last
+  // sync — GET /api/tickets returns whatever was last written locally,
+  // which can be stale if a ticket was closed in Jira since. Rather than
+  // show that stale "Open" for the second or so it takes the first sync
+  // to complete (then have it visibly flip to "Closed"), we hold off
+  // rendering statuses until that first sync resolves. Manual re-syncs
+  // (the button) don't re-trigger this — by then the list is already
+  // showing real data, so there's nothing misleading to hide.
+  const [hasSyncedOnce, setHasSyncedOnce] = useState(false);
 
   // Poll-on-demand Jira sync (see POST /api/tickets/sync in tickets.py):
   // pulls the current status of every ticket linked to a Jira issue and
@@ -2279,7 +2289,8 @@ function TicketList({ tickets: initialTickets }) {
         }
         setSyncState("done");
       })
-      .catch(() => setSyncState("error"));
+      .catch(() => setSyncState("error"))
+      .finally(() => setHasSyncedOnce(true));
   };
 
   useEffect(() => {
@@ -2344,7 +2355,11 @@ function TicketList({ tickets: initialTickets }) {
 
         {/* Table rows */}
         <div style={{ overflowY: "auto", flex: 1 }}>
-          {filtered.length === 0 ? (
+          {!hasSyncedOnce ? (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, color: "#9ca3af", fontSize: 13 }}>
+              Loading current statuses from Jira…
+            </div>
+          ) : filtered.length === 0 ? (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, flexDirection: "column", gap: 8 }}>
               <div style={{ fontSize: 15, fontWeight: 600, color: "#374151" }}>No tickets found</div>
               <div style={{ fontSize: 13, color: "#9ca3af" }}>Tickets will appear here once a scan has been reviewed and submitted</div>
@@ -2952,6 +2967,188 @@ function Dashboard() {
   );
 }
 
+// Severity -> bar color, same palette used elsewhere (Dashboard's stat
+// values, the export xlsx row highlights) so a severity always reads the
+// same color across the whole app.
+const SEVERITY_COLORS = { critical: "#dc2626", high: "#ea580c", medium: "#ca8a04", low: "#16a34a" };
+
+// Scan History & long-term analysis page. Pulls the FULL scan history (not
+// just the last 6 scans Dashboard's chart shows) plus recurring-CVE and
+// resolution stats computed server-side — see GET /api/scans/analysis in
+// scans.py. Answers questions the Dashboard snapshot can't: "is our
+// vulnerability count trending down over months?", "which CVEs keep coming
+// back scan after scan?", "how many scans have we actually run?"
+function ScanHistory() {
+  const [data, setData] = useState(null); // null while loading
+  const [loadError, setLoadError] = useState(false);
+  const [expandedScan, setExpandedScan] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/api/scans/analysis`, { credentials: "include" })
+      .then(res => res.json())
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setLoadError(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const totals = data?.totals || {};
+  const trend = data?.trend || [];
+  const recurring = data?.recurring || [];
+  const scans = data?.scans || [];
+
+  const scannerBreakdown = Object.entries(totals.scannerBreakdown || {});
+
+  return (
+    <>
+      <div className="heading">
+        <h1>Scan History &amp; Analysis</h1>
+        <div className="heading-sub">{data?.hasScans ? `${totals.scanCount} scan(s) on record` : "No scans yet"}</div>
+      </div>
+
+      <div className="stats-row">
+        <div className="stat-card"><div className="stat-label">Total Scans</div><div className="stat-value">{data?.hasScans ? totals.scanCount : "—"}</div></div>
+        <div className="stat-card"><div className="stat-label">Avg Findings / Scan</div><div className="stat-value">{data?.hasScans ? totals.avgFindingsPerScan : "—"}</div></div>
+        <div className="stat-card"><div className="stat-label">Unique CVEs Seen</div><div className="stat-value">{data?.hasScans ? totals.uniqueCvesSeen : "—"}</div></div>
+        <div className="stat-card"><div className="stat-label">Resolved CVEs</div><div className="stat-value" style={{ color: "#16a34a" }}>{data?.hasScans ? totals.resolvedCves : "—"}</div></div>
+      </div>
+
+      <div className="chart-card" style={{ marginBottom: 12 }}>
+        <div className="chart-title">Vulnerabilities over full scan history</div>
+        {trend.length ? (
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={trend}>
+              <CartesianGrid vertical={false} stroke="#f3f4f6" />
+              <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: "#9ca3af" }} />
+              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: "#9ca3af" }} allowDecimals={false} />
+              <Tooltip contentStyle={{ borderRadius: 10, border: "none", boxShadow: "0 4px 20px rgba(0,0,0,.1)", fontSize: 12 }} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Line type="monotone" dataKey="critical" name="Critical" stroke={SEVERITY_COLORS.critical} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="high" name="High" stroke={SEVERITY_COLORS.high} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="medium" name="Medium" stroke={SEVERITY_COLORS.medium} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="low" name="Low" stroke={SEVERITY_COLORS.low} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="total" name="Total" stroke="#2563eb" strokeWidth={2} strokeDasharray="4 3" dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 200, color: "#9ca3af", fontSize: 13 }}>
+            {loadError ? "Couldn't load scan history." : "Run a few scans to start building this trend."}
+          </div>
+        )}
+      </div>
+
+      <div className="mid-row" style={{ marginBottom: 12, gridTemplateColumns: "2fr 1fr" }}>
+        {/* Recurring vulnerabilities */}
+        <div className="chart-card">
+          <div className="chart-title">Recurring vulnerabilities</div>
+          {recurring.length === 0 ? (
+            <div style={{ color: "#9ca3af", fontSize: 13, padding: "8px 4px" }}>
+              {data?.hasScans ? "Nothing recurring yet — no CVE has shown up in more than one scan." : "Run a few scans to see which findings keep coming back."}
+            </div>
+          ) : (
+            <div style={{ overflowY: "auto", maxHeight: 260 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px 90px 110px", gap: 8, padding: "4px 0 8px", borderBottom: "1px solid #e5e7eb", position: "sticky", top: 0, background: "#fff" }}>
+                {["CVE", "Appeared In", "First Seen", "Last Seen", "In Latest Scan"].map(h => (
+                  <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</div>
+                ))}
+              </div>
+              {recurring.map(r => (
+                <div key={r.cve} style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px 90px 110px", gap: 8, padding: "8px 0", borderBottom: "1px solid #f3f4f6", alignItems: "center" }}>
+                  <div style={{ fontSize: 12, fontFamily: "monospace", color: "#374151" }}>{r.cve}</div>
+                  <div style={{ fontSize: 12, color: "#6b7280" }}>{r.occurrences} scans</div>
+                  <div style={{ fontSize: 11, color: "#9ca3af" }}>{_fmtDate(r.firstSeen)}</div>
+                  <div style={{ fontSize: 11, color: "#9ca3af" }}>{_fmtDate(r.lastSeen)}</div>
+                  <div>
+                    <span style={{
+                      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 20,
+                      background: r.stillOpen ? "#fef2f2" : "#f0fdf4",
+                      color: r.stillOpen ? "#dc2626" : "#16a34a",
+                    }}>
+                      {r.stillOpen ? "In latest scan" : "Not in latest scan"}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Scanner breakdown */}
+        <div className="insight-card">
+          <div className="insight-label">Scans by scanner</div>
+          {scannerBreakdown.length === 0 ? (
+            <div className="insight-text">No scans recorded yet.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+              {scannerBreakdown.map(([name, count]) => (
+                <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#1e3a8a" }}>
+                  <span style={{ textTransform: "capitalize" }}>{name}</span>
+                  <span style={{ fontWeight: 700 }}>{count}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Full scan history table */}
+      <div className="activity-card" style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        <div className="activity-title">All scans</div>
+        {scans.length === 0 ? (
+          <div style={{ color: "#9ca3af", fontSize: 13, padding: "8px 4px" }}>No scans yet — upload or run one to start building history.</div>
+        ) : (
+          <div style={{ overflowY: "auto" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "110px 90px 1fr 60px 60px 60px 60px 60px", gap: 8, padding: "6px 0", borderBottom: "1px solid #e5e7eb", position: "sticky", top: 0, background: "#fff" }}>
+              {["Date", "Scanner", "Target", "Total", "Crit", "High", "Med", "Low"].map(h => (
+                <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</div>
+              ))}
+            </div>
+            {scans.map(s => (
+              <div key={s.id}>
+                <div
+                  onClick={() => setExpandedScan(expandedScan === s.id ? null : s.id)}
+                  style={{ display: "grid", gridTemplateColumns: "110px 90px 1fr 60px 60px 60px 60px 60px", gap: 8, padding: "10px 0", borderBottom: "1px solid #f3f4f6", cursor: "pointer", alignItems: "center" }}>
+                  <div style={{ fontSize: 12, color: "#6b7280" }}>{_fmtDate(s.createdAt)}</div>
+                  <div style={{ fontSize: 12, color: "#374151", textTransform: "capitalize" }}>{s.scanner || "—"}</div>
+                  <div style={{ fontSize: 12, color: "#374151", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.target || "—"}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#111" }}>{s.total}</div>
+                  <div style={{ fontSize: 12, color: SEVERITY_COLORS.critical, fontWeight: 600 }}>{s.critical}</div>
+                  <div style={{ fontSize: 12, color: SEVERITY_COLORS.high, fontWeight: 600 }}>{s.high}</div>
+                  <div style={{ fontSize: 12, color: SEVERITY_COLORS.medium, fontWeight: 600 }}>{s.medium}</div>
+                  <div style={{ fontSize: 12, color: SEVERITY_COLORS.low, fontWeight: 600 }}>{s.low}</div>
+                </div>
+                {expandedScan === s.id && (
+                  <div style={{ padding: "8px 0 14px 4px", fontSize: 12, color: "#6b7280", background: "#f9fafb", borderBottom: "1px solid #f3f4f6" }}>
+                    <div style={{ marginBottom: 4 }}>{s.source === "live" ? "Live scan" : "Uploaded report"} · Unrated: {s.unknown}</div>
+                    {s.cveIds?.length ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {s.cveIds.map(cve => (
+                          <span key={cve} style={{ fontFamily: "monospace", fontSize: 11, background: "#eef0f4", padding: "2px 8px", borderRadius: 10 }}>{cve}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: "#9ca3af" }}>No CVE-tagged findings in this scan.</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function _fmtDate(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return iso.slice(0, 10);
+  }
+}
+
 //Root
 // Floating scan-scoped chatbot. Replaces the static chat-bubble placeholder.
 // Answers questions about lastVulnerabilities (the current scan/report) via
@@ -3250,6 +3447,7 @@ export default function App() {
 
         {activeTab === "dashboard" && <Dashboard />}
         {activeTab === "upload-scan" && renderUploadContent()}
+        {activeTab === "history" && <ScanHistory />}
         {activeTab === "tickets" && <TicketList tickets={liveTickets} />}
         {activeTab === "profile" && (
           <Profile
