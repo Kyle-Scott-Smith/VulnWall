@@ -15,12 +15,14 @@ from openpyxl.utils import get_column_letter
 import tenable_client
 from ai_analysis import OllamaVulnerabilityAnalyzer
 from chatbot import ScanChatbot
+import email_notifications
 
 from scanners.registry import SCANNERS, detect_scanner, get_scanner
 from scanners.utils import dedupe_by_cve, sort_by_severity
 from jira_integration import jira_bp
 from registry_credentials import registry_bp, get_credentials as get_registry_credentials
-from auth import auth_bp
+from auth import auth_bp, get_user_by_id
+from google_auth import google_auth_bp
 from business_context import business_context_bp, get_business_context
 from tickets import tickets_bp
 from scans import scans_bp, record_scan
@@ -37,6 +39,7 @@ CORS(app, supports_credentials=True)
 app.register_blueprint(jira_bp)
 app.register_blueprint(registry_bp)
 app.register_blueprint(auth_bp)
+app.register_blueprint(google_auth_bp)
 app.register_blueprint(business_context_bp)
 app.register_blueprint(tickets_bp)
 app.register_blueprint(scans_bp)
@@ -83,6 +86,32 @@ def _finalize(vulnerabilities):
     vulnerabilities = _cross_reference_tenable(vulnerabilities)
     vulnerabilities = sort_by_severity(vulnerabilities)
     return vulnerabilities
+
+
+def _maybe_send_critical_alert(user_id, scanner_name, target, new_critical_vulns):
+    """Fires off the "new Critical findings" email (see
+    email_notifications.py) if — and only if — someone's signed in, this
+    scan actually turned up new Criticals (record_scan already did the
+    "new since last scan" diffing), and that user has the Profile page's
+    Email notifications toggle on. Never lets an email problem (SMTP not
+    configured, provider rejects the send, network hiccup) fail the scan
+    request itself — the scan already succeeded by the time this runs."""
+    if not user_id or not new_critical_vulns:
+        return
+
+    user = get_user_by_id(user_id)
+    if not user or not user["notify_on_critical"]:
+        return
+
+    try:
+        email_notifications.send_critical_alert(
+            user["email"], user["name"], new_critical_vulns,
+            scan_context={"scanner": scanner_name, "target": target},
+        )
+    except EnvironmentError:
+        logger.info("Email alerts not configured - skipping critical-finding email")
+    except Exception:
+        logger.exception("Failed to send critical-finding email alert")
 
 
 @app.route("/api/health", methods=["GET"])
@@ -148,7 +177,8 @@ def upload_scan():
 
     vulnerabilities = _finalize(scanner.parse(data))
 
-    record_scan(session.get("user_id"), scanner.name, "upload", file.filename, vulnerabilities)
+    new_critical = record_scan(session.get("user_id"), scanner.name, "upload", file.filename, vulnerabilities)
+    _maybe_send_critical_alert(session.get("user_id"), scanner.name, file.filename, new_critical)
 
     return jsonify({
         "status": "processed",
@@ -193,7 +223,8 @@ def trigger_scan():
 
     vulnerabilities = _finalize(scanner.parse(raw))
 
-    record_scan(session.get("user_id"), scanner.name, "live", target, vulnerabilities)
+    new_critical = record_scan(session.get("user_id"), scanner.name, "live", target, vulnerabilities)
+    _maybe_send_critical_alert(session.get("user_id"), scanner.name, target, new_critical)
 
     return jsonify({
         "status": "processed",

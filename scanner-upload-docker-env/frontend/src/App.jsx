@@ -491,11 +491,71 @@ function passwordError(password) {
   return null;
 }
 
+// Small inline Google "G" mark, official 4-color rendition — avoids
+// pulling in an icon library for one icon.
+function GoogleGIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+      <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84c-.21 1.13-.84 2.09-1.8 2.73v2.27h2.91c1.7-1.57 2.69-3.88 2.69-6.64z" />
+      <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.91-2.27c-.81.54-1.84.86-3.05.86-2.34 0-4.33-1.58-5.04-3.71H.96v2.34C2.44 15.98 5.48 18 9 18z" />
+      <path fill="#FBBC05" d="M3.96 10.7c-.18-.54-.28-1.11-.28-1.7s.1-1.16.28-1.7V4.96H.96C.35 6.17 0 7.55 0 9s.35 2.83.96 4.04l3-2.34z" />
+      <path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0 5.48 0 2.44 2.02.96 4.96l3 2.34C4.67 5.16 6.66 3.58 9 3.58z" />
+    </svg>
+  );
+}
+
+// "Continue with Google" — used on both SignIn and SignUp, since Google
+// Sign-In (google_auth.py) handles both in one flow: sign in if the email
+// already has an account, sign up automatically if not. Hides itself if
+// the server hasn't got GOOGLE_CLIENT_ID/SECRET configured, rather than
+// showing a button that would just error.
+function GoogleAuthButton({ label }) {
+  const [configured, setConfigured] = useState(false);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/auth/google/status`, { credentials: "include" })
+      .then(res => res.json())
+      .then(data => setConfigured(!!data.configured))
+      .catch(() => setConfigured(false));
+  }, []);
+
+  if (!configured) return null;
+
+  return (
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "4px 0 16px" }}>
+        <div style={{ flex: 1, height: 1, background: "#e5e7eb" }} />
+        <div style={{ fontSize: 11, color: "#9ca3af", fontWeight: 600 }}>OR</div>
+        <div style={{ flex: 1, height: 1, background: "#e5e7eb" }} />
+      </div>
+      <button
+        type="button"
+        onClick={() => { window.location.href = `${API_BASE}/api/auth/google/login`; }}
+        style={{ width: "100%", padding: "11px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 16 }}>
+        <GoogleGIcon />
+        {label}
+      </button>
+    </>
+  );
+}
+
 function SignIn({ onSignIn, onGoSignUp }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  // If Google sign-in just failed and redirected back here (see
+  // google_auth.py's _redirect_with_error), surface that message once and
+  // strip the ?authError= query param so a page refresh doesn't re-show
+  // it — same cleanup pattern JiraConnect uses for ?jira=connected.
+  useEffect(() => {
+    const authError = new URLSearchParams(window.location.search).get("authError");
+    if (authError) {
+      setError(authError);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
 
   const handle = async () => {
     if (!email || !password) { setError("Please fill in all fields"); return; }
@@ -556,6 +616,8 @@ function SignIn({ onSignIn, onGoSignUp }) {
           {submitting ? "Signing in…" : "Sign in"}
         </button>
 
+        <GoogleAuthButton label="Continue with Google" />
+
         <div style={{ textAlign: "center", fontSize: 13, color: "#6b7280" }}>
           Don't have an account?{" "}
           <span onClick={onGoSignUp} style={{ color: "#2563eb", fontWeight: 600, cursor: "pointer" }}>Sign up</span>
@@ -564,6 +626,7 @@ function SignIn({ onSignIn, onGoSignUp }) {
     </div>
   );
 }
+
 
 //Sign Up
 function SignUp({ onSignUp, onGoSignIn }) {
@@ -657,6 +720,8 @@ function SignUp({ onSignUp, onGoSignIn }) {
           style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: submitting ? "default" : "pointer", opacity: submitting ? 0.7 : 1, marginBottom: 16 }}>
           {submitting ? "Creating account…" : "Create account"}
         </button>
+
+        <GoogleAuthButton label="Sign up with Google" />
 
         <div style={{ textAlign: "center", fontSize: 13, color: "#6b7280" }}>
           Already have an account?{" "}
@@ -2811,7 +2876,7 @@ function Profile({ onSignOut, userName, userEmail, notifications, setNotificatio
             <div style={{ fontSize: 12, color: "#6b7280" }}>Get alerted for critical vulnerabilities</div>
           </div>
           <div
-            onClick={() => setNotifications(n => !n)}
+            onClick={() => setNotifications(!notifications)}
             style={{ width: 44, height: 24, borderRadius: 99, background: notifications ? "#2563eb" : "#e5e7eb", cursor: "pointer", position: "relative", transition: "background .2s", flexShrink: 0 }}>
             <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: notifications ? 23 : 3, transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
           </div>
@@ -3318,6 +3383,19 @@ export default function App() {
   };
 
   useEffect(() => {
+    // A fresh Google sign-up redirects here as a normal page navigation
+    // (see google_auth.py's callback), so we can't tell "brand new
+    // account" apart from "returning user's session restored" just from
+    // /api/auth/me — both come back authenticated. google_auth.py flags
+    // the new-account case with ?newAccount=1 on the redirect (same
+    // pattern SignIn already uses for ?authError=); catch it here so SSO
+    // signups land in the business-context questionnaire too, instead of
+    // skipping straight to the dashboard.
+    const isNewAccount = new URLSearchParams(window.location.search).get("newAccount") === "1";
+    if (isNewAccount) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+
     fetch(`${API_BASE}/api/auth/me`, { credentials: "include" })
       .then(res => res.json())
       .then(data => {
@@ -3326,14 +3404,35 @@ export default function App() {
           setUserEmail(data.email);
           setAuthed(true);
           const prefs = loadProfilePrefs(data.email);
-          setNotifications(prefs.notifications);
+          // notifyOnCritical is authoritative from the server (it's what
+          // scanner.py actually checks before sending an alert email) —
+          // only defaultAssign, which has no server-side effect, comes
+          // from localStorage.
+          setNotifications(!!data.notifyOnCritical);
           setDefaultAssign(prefs.defaultAssign);
+          if (isNewAccount) {
+            setShowBusinessContext(true);
+          }
           loadTickets();
         }
       })
       .catch(() => {})
       .finally(() => setAuthChecked(true));
   }, []);
+
+  // Flips the Email notifications toggle and persists it server-side (see
+  // PATCH /api/auth/notifications in auth.py) — scanner.py reads this
+  // column directly when deciding whether to send a critical-finding
+  // alert, so it has to live on the backend, not just in this browser tab.
+  const updateNotifications = (enabled) => {
+    setNotifications(enabled);
+    fetch(`${API_BASE}/api/auth/notifications`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ enabled }),
+    }).catch(() => {});
+  };
 
   // Whenever the signed-in user changes their profile prefs, persist them
   // under that user's own key so they're there next time they sign in.
@@ -3400,7 +3499,7 @@ export default function App() {
                   setUserEmail(data.email);
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
-                  setNotifications(prefs.notifications);
+                  setNotifications(!!data.notifyOnCritical);
                   setDefaultAssign(prefs.defaultAssign);
                   loadTickets();
                 }}
@@ -3412,7 +3511,7 @@ export default function App() {
                   setUserEmail(data.email);
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
-                  setNotifications(prefs.notifications);
+                  setNotifications(!!data.notifyOnCritical);
                   setDefaultAssign(prefs.defaultAssign);
                   setShowBusinessContext(true);
                 }}
@@ -3463,7 +3562,7 @@ export default function App() {
             userName={userName}
             userEmail={userEmail}
             notifications={notifications}
-            setNotifications={setNotifications}
+            setNotifications={updateNotifications}
             defaultAssign={defaultAssign}
             setDefaultAssign={setDefaultAssign}
           />

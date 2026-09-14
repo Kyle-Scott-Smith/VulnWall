@@ -75,9 +75,17 @@ def record_scan(user_id, scanner_name, source, target, vulnerabilities):
     source: "upload" or "live", so the history can distinguish them later
     if needed.
     target: filename (upload) or scan target (live), for context only.
+
+    Returns the list of full vulnerability dicts that are BOTH Critical
+    severity AND weren't present in this user's immediately previous scan
+    — this is what scanner.py checks to decide whether a "new critical
+    findings" email alert is warranted (see email_notifications.py). On a
+    user's very first scan, everything Critical counts as new (there's
+    nothing to diff against, same convention dashboard.py uses for "new
+    since last scan"). Returns an empty list if nobody's signed in.
     """
     if not user_id:
-        return
+        return []
 
     counts = {sev: 0 for sev in SEVERITIES}
     cve_ids = []
@@ -89,6 +97,12 @@ def record_scan(user_id, scanner_name, source, target, vulnerabilities):
 
     conn = _get_db()
     try:
+        previous = conn.execute(
+            "SELECT cve_ids FROM scans WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        previous_cves = set(json.loads(previous["cve_ids"])) if previous and previous["cve_ids"] else set()
+
         conn.execute(
             """
             INSERT INTO scans (
@@ -106,6 +120,13 @@ def record_scan(user_id, scanner_name, source, target, vulnerabilities):
         conn.commit()
     finally:
         conn.close()
+
+    return [
+        v for v in (vulnerabilities or [])
+        if str(v.get("severity") or "").strip().lower() == "critical"
+        and v.get("cve")
+        and v.get("cve") not in previous_cves
+    ]
 
 
 def _row_to_json(row):
