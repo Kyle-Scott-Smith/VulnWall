@@ -17,20 +17,31 @@ vulnerabilities from the last scan" is computed from (see dashboard.py):
 diff this scan's CVE ids against the previous scan's.
 
 Endpoints registered by this blueprint (mounted at /api/scans):
-  GET /api/scans          -> the signed-in user's scan history, most recent first
-  GET /api/scans/analysis -> long-term trend/analysis view over the FULL scan
-                              history (not just the last few) — see
-                              scan_analysis() below for the exact shape.
+  GET  /api/scans          -> the signed-in user's scan history, most recent first
+  POST /api/scans          -> records a scan as completed (see complete_scan()
+                               below) and, if warranted, sends the critical-
+                               finding email alert. Called by the frontend
+                               from the Review & Send step, once tickets have
+                               actually been confirmed/sent — NOT right after
+                               a scan is uploaded or run — so an abandoned
+                               scan never shows up in history/dashboard.
+  GET  /api/scans/analysis -> long-term trend/analysis view over the FULL scan
+                               history (not just the last few) — see
+                               scan_analysis() below for the exact shape.
 """
 
 import json
+import logging
 from datetime import datetime, timezone
 
-from flask import Blueprint, jsonify, session
+from flask import Blueprint, jsonify, request, session
 
-from auth import _get_db
+import email_notifications
+from auth import _get_db, get_user_by_id
 
 scans_bp = Blueprint("scans", __name__, url_prefix="/api/scans")
+
+logger = logging.getLogger(__name__)
 
 SEVERITIES = ("critical", "high", "medium", "low", "unknown")
 
@@ -127,6 +138,73 @@ def record_scan(user_id, scanner_name, source, target, vulnerabilities):
         and v.get("cve")
         and v.get("cve") not in previous_cves
     ]
+
+
+def _maybe_send_critical_alert(user_id, scanner_name, target, new_critical_vulns):
+    """Fires off the "new Critical findings" email (see
+    email_notifications.py) if — and only if — someone's signed in, this
+    scan actually turned up new Criticals (record_scan already did the
+    "new since last scan" diffing), and that user has the Profile page's
+    Email notifications toggle on (off by default — see auth.py's
+    notify_on_critical column). Never lets an email problem (SMTP not
+    configured, provider rejects the send, network hiccup) fail the request
+    that triggered it — the scan/ticket flow already succeeded by the time
+    this runs. Moved here (from scanner.py) alongside record_scan() now
+    that both fire together from POST /api/scans, once the wizard is
+    actually complete rather than right after parsing."""
+    if not user_id or not new_critical_vulns:
+        return
+
+    user = get_user_by_id(user_id)
+    if not user or not user["notify_on_critical"]:
+        return
+
+    try:
+        email_notifications.send_critical_alert(
+            user["email"], user["name"], new_critical_vulns,
+            scan_context={"scanner": scanner_name, "target": target},
+        )
+    except EnvironmentError:
+        logger.info("Email alerts not configured - skipping critical-finding email")
+    except Exception:
+        logger.exception("Failed to send critical-finding email alert")
+
+
+@scans_bp.route("", methods=["POST"])
+def complete_scan():
+    """Records a scan as completed — and, if warranted, fires the critical-
+    finding email alert (see _maybe_send_critical_alert above).
+
+    Deliberately NOT called right after a scan is uploaded/run (compare:
+    it used to be called from scanner.py's /api/upload-scan and /api/scan).
+    Instead, the frontend calls this from the Review & Send step, only
+    once the user has gone through the full wizard and confirmed sending
+    tickets (see ReviewSendStep's "Send to Jira" handler in App.jsx). A
+    scan someone uploads or runs and then abandons partway through — closes
+    the tab, never reviews the findings, never sends anything — should NOT
+    show up in scan history or the dashboard as a completed scan.
+
+    Body: {scanner, source, target, vulnerabilities} — the same finalized
+    vulnerability list (post-dedupe/Tenable-cross-reference/AI-analysis)
+    the frontend has been holding onto since upload/scan, same shape
+    /api/upload-scan, /api/scan, and /api/analyze already return.
+    A no-op (still returns 200) if nobody's signed in, same convention
+    record_scan() itself already follows.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    vulnerabilities = body.get("vulnerabilities")
+    if not isinstance(vulnerabilities, list):
+        return jsonify({"error": "Expected a 'vulnerabilities' array"}), 400
+
+    user_id = session.get("user_id")
+    scanner_name = body.get("scanner")
+    source = body.get("source")
+    target = body.get("target")
+
+    new_critical = record_scan(user_id, scanner_name, source, target, vulnerabilities)
+    _maybe_send_critical_alert(user_id, scanner_name, target, new_critical)
+
+    return jsonify({"status": "recorded"})
 
 
 def _row_to_json(row):

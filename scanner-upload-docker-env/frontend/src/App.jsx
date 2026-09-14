@@ -59,6 +59,15 @@ let validationRows = [
 // showing (cve, title, severity, cvss, asset, package — see /api/chat).
 let lastVulnerabilities = [];
 
+// Which scanner/source/target the current wizard run came from — set once
+// when raw results first land (see UploadStep's onParsed calls below) and
+// carried through analysis, so ReviewSendStep can tell the backend what
+// this scan actually was when the user confirms sending tickets (see
+// POST /api/scans in scans.py). A scan only gets recorded to history at
+// that point, not right after upload/scan, so abandoning the wizard partway
+// through never shows up as a "completed" scan.
+let lastScanMeta = { scanner: null, source: null, target: null };
+
 // Turns the parsed vulnerability list returned by the scanner-upload backend
 // into the same shapes the wizard's UI already renders (vulnRows, cveDetails,
 // allRisks, validationRows), replacing the demo placeholder data above.
@@ -68,9 +77,13 @@ let lastVulnerabilities = [];
 // went through POST /api/analyze first — see runAiAnalysis() below. If
 // those fields aren't present (analysis skipped or failed), fall back to
 // the same heuristic placeholders as before so the UI never breaks.
-function applyScanResults(vulnerabilities) {
+function applyScanResults(vulnerabilities, meta) {
   const list = Array.isArray(vulnerabilities) ? vulnerabilities : [];
   lastVulnerabilities = list;
+  // Only set when actually passed — the second onParsed call per scan (once
+  // AI analysis finishes) re-applies the same vulnerabilities without meta,
+  // and shouldn't wipe out what the first call already recorded.
+  if (meta) lastScanMeta = meta;
 
   vulnRows = list.map(v => ({
     id: v.cve || v.title,
@@ -462,14 +475,16 @@ function Nav({ activeTab, setActiveTab }) {
 }
 
 //footer
-function Footer({ step, onBack, onNext, nextLabel = "Next", disableNext = false }) {
+function Footer({ step, onBack, onNext, nextLabel = "Next", disableNext = false, hideNext = false }) {
   return (
     <div className="page-footer" style={{ position: "relative" }}>
       <button className="btn btn-ghost" onClick={onBack}>Back</button>
       <span className="step-counter">Step {step + 1} of {STEPS.length}</span>
-      <button className="btn btn-primary" onClick={onNext} disabled={disableNext} style={{ opacity: disableNext ? 0.5 : 1 }}>
-        {nextLabel}
-      </button>
+      {!hideNext && (
+        <button className="btn btn-primary" onClick={onNext} disabled={disableNext} style={{ opacity: disableNext ? 0.5 : 1 }}>
+          {nextLabel}
+        </button>
+      )}
     </div>
   );
 }
@@ -1039,7 +1054,9 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
       if (!res.ok) throw new Error(data.error || "Upload failed");
 
       const vulnerabilities = data.vulnerabilities || [];
-      onParsed(vulnerabilities); // show raw + Tenable cross-reference results immediately...
+      // show raw + Tenable cross-reference results immediately, and record
+      // which scanner/file this run came from for POST /api/scans later...
+      onParsed(vulnerabilities, { scanner: data.scanner, source: "upload", target: f.name });
       setFoundCount(data.vulnerabilitiesFound ?? vulnerabilities.length);
       setTenableMatchCount(vulnerabilities.filter(v => v.tenable_exposure?.matched).length);
       setStatus("success");
@@ -1127,7 +1144,9 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
       if (!res.ok) throw new Error(data.error || "Scan failed");
 
       const vulnerabilities = data.vulnerabilities || [];
-      onParsed(vulnerabilities); // show raw + Tenable cross-reference results immediately...
+      // show raw + Tenable cross-reference results immediately, and record
+      // which scanner/target this run came from for POST /api/scans later...
+      onParsed(vulnerabilities, { scanner: data.scanner, source: "live", target: target.trim() });
       setLiveFoundCount(data.vulnerabilitiesFound ?? vulnerabilities.length);
       setLiveTenableMatchCount(vulnerabilities.filter(v => v.tenable_exposure?.matched).length);
       setLiveStatus("success");
@@ -1452,7 +1471,7 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
         {(() => {
           const total = allRisks.length;
           const critical = allRisks.filter(r => r.severity === "Critical").length;
-          const avgCvss = (allRisks.reduce((s, r) => s + r.cvss, 0) / total).toFixed(1);
+          const avgCvss = total === 0 ? "0.0" : (allRisks.reduce((s, r) => s + r.cvss, 0) / total).toFixed(1);
           return (
             <div className="ai-stats">
               <div className="ai-stat">
@@ -1531,16 +1550,27 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
             <div className="ai-insight-title">AI-Powered Analysis</div>
           </div>
           <div className="ai-insight-analyzing">Analyzing vulnerability patterns and severity prioritization...</div>
-          <div className="ai-insight-chips">
-            <div className="ai-chip">
-              <div className="ai-chip-val">3 Critical Issues</div>
-              <div className="ai-chip-desc">Require immediate attention</div>
-            </div>
-            <div className="ai-chip">
-              <div className="ai-chip-val">5 False Positives</div>
-              <div className="ai-chip-desc">AI-filtered for review</div>
-            </div>
-          </div>
+          {(() => {
+            const criticalCount = allRisks.filter(r => r.severity === "Critical").length;
+            // Same "Needs Review" criteria the Validation step uses (see
+            // applyScanResults' validationRows: missing data, or a real AI
+            // analysis that came back with confidence < 60) — reusing it
+            // here instead of a separate hardcoded "false positives" number
+            // that the backend never actually computes.
+            const flaggedCount = validationRows.filter(r => r.status === "Needs Review").length;
+            return (
+              <div className="ai-insight-chips">
+                <div className="ai-chip">
+                  <div className="ai-chip-val">{criticalCount} Critical Issue{criticalCount === 1 ? "" : "s"}</div>
+                  <div className="ai-chip-desc">Require immediate attention</div>
+                </div>
+                <div className="ai-chip">
+                  <div className="ai-chip-val">{flaggedCount} Flagged for Review</div>
+                  <div className="ai-chip-desc">Low AI confidence or incomplete data</div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
       <Footer step={1} onBack={onBack} onNext={onNext} />
@@ -1827,6 +1857,7 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
           <div>
             <div className="page-title">Validation</div>
             <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 4 }}>Anti-hallucination</div>
+            <div className="val-desc" style={{ marginBottom: 0 }}>For each selected vulnerability we cross-check the AI summary, remediation, severity classification, and flag any potential hallucinations against NVD, MITRE, and vendor advisories.</div>
           </div>
           <div style={{ textAlign: "right" }}>
             <div className="val-issues-label">Issues Found</div>
@@ -1841,7 +1872,6 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
             </button>
           </div>
         </div>
-        <div className="val-desc">For each selected vulnerability we cross-check the AI summary, remediation, severity classification, and flag any potential hallucinations against NVD, MITRE, and vendor advisories.</div>
 
         <FilterBar
           search={search}
@@ -2155,7 +2185,7 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
           <div style={{ fontSize: 13, color: "#6b7280" }}>{tickets.length} ticket{tickets.length !== 1 ? "s" : ""} successfully created</div>
           <button onClick={onNext} className="btn btn-primary" style={{ marginTop: 8 }}>Go to Tickets</button>
         </div>
-        <Footer step={5} onBack={onBack} onNext={onNext} nextLabel="Done" />
+        <Footer step={5} onBack={onBack} hideNext />
       </>
     );
   }
@@ -2289,6 +2319,28 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
                   // local ticket list below still gets these either way
                 }
 
+                // Only NOW does this scan count as "completed" — see
+                // POST /api/scans in scans.py. This is what makes scan
+                // history/dashboard show a real, reviewed scan rather than
+                // one someone uploaded and then abandoned before reaching
+                // this screen. Best-effort, same reasoning as the ticket
+                // save above: a failure here shouldn't block the wizard.
+                try {
+                  await fetch(`${API_BASE}/api/scans`, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      scanner: lastScanMeta.scanner,
+                      source: lastScanMeta.source,
+                      target: lastScanMeta.target,
+                      vulnerabilities: lastVulnerabilities,
+                    }),
+                  });
+                } catch {
+                  // scan just won't show in history this time; nothing else depends on it
+                }
+
                 onSubmit(newTickets);
                 setSending(false);
                 setSent(true);
@@ -2299,7 +2351,7 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
           </>
         )}
       </div>
-      <Footer step={5} onBack={onBack} onNext={onNext} nextLabel="Done" />
+      <Footer step={5} onBack={onBack} hideNext />
     </>
   );
 }
@@ -3320,7 +3372,11 @@ function ChatWidget() {
 // localStorage per-account, keyed by email, so they survive tab switches,
 // sign-out/sign-in, and page reloads — not just held in memory.
 const PROFILE_PREFS_PREFIX = "vulnwiz-profile-prefs:";
-const DEFAULT_PROFILE_PREFS = { notifications: true, defaultAssign: "Security Team" };
+// notifications defaults to off, matching the backend's default (see
+// auth.py's notify_on_critical column, NOT NULL DEFAULT 0) — the server
+// value is authoritative once a session loads (see the /api/auth/me and
+// sign-in/sign-up handlers below), this is just what shows before that.
+const DEFAULT_PROFILE_PREFS = { notifications: false, defaultAssign: "Security Team" };
 
 function loadProfilePrefs(email) {
   if (!email) return DEFAULT_PROFILE_PREFS;
@@ -3456,8 +3512,8 @@ export default function App() {
     setUploadedFile(null);
   };
 
-  const handleScanParsed = vulnerabilities => {
-    applyScanResults(vulnerabilities);
+  const handleScanParsed = (vulnerabilities, meta) => {
+    applyScanResults(vulnerabilities, meta);
     setSelected(vulnRows.map(r => r.id));
   };
 

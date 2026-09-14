@@ -84,7 +84,7 @@ def init_db():
         if "google_sub" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
         if "notify_on_critical" not in existing_cols:
-            conn.execute("ALTER TABLE users ADD COLUMN notify_on_critical INTEGER NOT NULL DEFAULT 1")
+            conn.execute("ALTER TABLE users ADD COLUMN notify_on_critical INTEGER NOT NULL DEFAULT 0")
         # Partial unique index (only enforced where google_sub is actually
         # set) so two different Google accounts can never silently collide
         # onto the same local user row.
@@ -163,8 +163,8 @@ def create_google_user(name, email, google_sub):
     try:
         cur = conn.execute(
             """
-            INSERT INTO users (name, email, password_hash, created_at, auth_provider, google_sub)
-            VALUES (?, ?, ?, ?, 'google', ?)
+            INSERT INTO users (name, email, password_hash, created_at, auth_provider, google_sub, notify_on_critical)
+            VALUES (?, ?, ?, ?, 'google', ?, 0)
             """,
             (name, email, placeholder_hash, now, google_sub),
         )
@@ -206,7 +206,7 @@ def signup():
     conn = _get_db()
     try:
         cur = conn.execute(
-            "INSERT INTO users (name, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO users (name, email, password_hash, created_at, notify_on_critical) VALUES (?, ?, ?, ?, 0)",
             (name, email, password_hash, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
