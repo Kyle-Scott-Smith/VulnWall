@@ -61,11 +61,18 @@ Rules:
     e.g. why internet-facing + regulated data compounds the risk, or why an air-gapped internal system narrows
     the realistic blast radius. If no "Business context" section is present in the prompt, set this to an empty
     string "" - do not invent business details that weren't provided.
-  "fixes" (array of 2-4 short strings, concrete remediation steps an IT generalist can follow): when business
-    context is provided, at least one entry should reflect it specifically - e.g. a compliance-driven
-    documentation/reporting step for the named framework(s), a remediation timeline suited to the criticality
-    tier, or a network segmentation step for an internet-facing or air-gapped system. Don't force this if it
-    would be contrived; a technically-sound generic fix is better than a forced business reference.
+  "fixes" (array of 2-4 short strings, concrete remediation steps an IT generalist can follow): the input does
+    NOT tell you the actual patched version, so NEVER invent one (e.g. "upgrade to 5.6.2") — you cannot know
+    that number is real, and guessing is actively dangerous for CVEs caused by a compromised release, where the
+    "newer" version is the malicious one and the real fix is a downgrade. Phrase version-related fixes as
+    "upgrade to the vendor's current patched release" or "confirm the fixed version against the vendor advisory
+    or NVD entry for this CVE" instead of naming a number. Prefer concrete fixes that don't depend on a version
+    number at all when they fit (disable the affected feature, restrict network exposure, rotate credentials,
+    apply the vendor's advisory steps directly). When business context is provided, at least one entry should
+    reflect it specifically - e.g. a compliance-driven documentation/reporting step for the named framework(s),
+    a remediation timeline suited to the criticality tier, or a network segmentation step for an internet-facing
+    or air-gapped system. Don't force this if it would be contrived; a technically-sound generic fix is better
+    than a forced business reference.
   "confidence" (integer 0-100, how confident you are in this analysis given the completeness of the input data —
     lower it when the description or CVSS data is missing or thin),
   "priority_tier" (string, one of "P1", "P2", "P3", "P4" — P1 is most urgent). Anchor the tier to the input CVSS
@@ -78,6 +85,7 @@ Rules:
 
 _SIMPLIFIED_SYSTEM_PROMPT = """You are a cybersecurity analyst. Only use the data given.
 Respond ONLY with JSON: {"why": "technical explanation of the vulnerability", "business_impact": "2-4 sentences on what this specifically means for this organisation, naming its sector/compliance/data/exposure details if a Business context section was given, else empty string", "fixes": ["...", "..."], "confidence": 0-100, "priority_tier": "P1|P2|P3|P4"}
+Never name a specific fixed/patched version number in "fixes" - you were not given one, so say "upgrade to the vendor's current patched release and confirm the version against the advisory" instead of guessing a number.
 No other text."""
 
 _REQUIRED_FIELDS = {"why": str, "business_impact": str, "fixes": list, "confidence": int, "priority_tier": str}
