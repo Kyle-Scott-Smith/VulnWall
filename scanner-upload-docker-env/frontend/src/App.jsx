@@ -902,6 +902,33 @@ const INTERNET_FACING_OPTIONS = [
   { value: "mixed", label: "Mixed — some services public, some internal" },
 ];
 
+// Follow-up shown only when internetFacing is public/mixed — a public
+// marketing site and a public admin panel carry very different risk even
+// though both are "public".
+const EXPOSED_SYSTEM_OPTIONS = [
+  { value: "website", label: "Public website / marketing site" },
+  { value: "admin_panel", label: "Admin panel or management console" },
+  { value: "remote_access", label: "Remote access (VPN, SSH, RDP, etc.)" },
+  { value: "api", label: "Public API" },
+  { value: "other", label: "Other" },
+];
+
+// The anchor question: instead of inferring what an org values from
+// sector/compliance alone, ask directly what would concern them most.
+const TOP_CONCERN_OPTIONS = [
+  { value: "revenue_loss", label: "Lost revenue" },
+  { value: "customer_trust", label: "Loss of customer trust" },
+  { value: "legal_regulatory", label: "Legal / regulatory consequences" },
+  { value: "physical_safety", label: "Physical or life-safety impact" },
+  { value: "operational_downtime", label: "Operational downtime" },
+];
+
+const HAD_BREACH_OPTIONS = [
+  { value: "yes", label: "Yes" },
+  { value: "no", label: "No" },
+  { value: "not_sure", label: "Not sure" },
+];
+
 // Not exhaustive, but covers the frameworks that most change how a
 // vulnerability should be prioritised (breach notification clocks,
 // mandated patch windows, audit evidence requirements, etc.).
@@ -964,20 +991,31 @@ function BusinessContextStep({ onComplete, onCancel, initialData = null, mode = 
   const [dataSensitivity, setDataSensitivity] = useState(initialData?.dataSensitivity || []);
   const [availabilityImpact, setAvailabilityImpact] = useState(initialData?.availabilityImpact || "");
   const [internetFacing, setInternetFacing] = useState(initialData?.internetFacing || "");
+  const [exposedSystems, setExposedSystems] = useState(initialData?.exposedSystems || []);
+  const [exposedSystemsOther, setExposedSystemsOther] = useState(initialData?.exposedSystemsOther || "");
   const [complianceScope, setComplianceScope] = useState(initialData?.complianceScope || []);
   const [airGapped, setAirGapped] = useState(initialData?.airGapped ?? null); // null | true | false
   const [airGappedDetails, setAirGappedDetails] = useState(initialData?.airGappedDetails || "");
   const [hasSecurityTeam, setHasSecurityTeam] = useState(initialData?.hasSecurityTeam ?? null); // optional
+  const [revenueGenerating, setRevenueGenerating] = useState(initialData?.revenueGenerating ?? null);
+  const [hadBreach, setHadBreach] = useState(initialData?.hadBreach || "");
+  const [topConcern, setTopConcern] = useState(initialData?.topConcern || "");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  const needsExposedSystems = internetFacing === "public" || internetFacing === "mixed";
 
   const valid =
     sector && (sector !== "other" || sectorOther.trim()) &&
     dataSensitivity.length > 0 &&
     availabilityImpact &&
     internetFacing &&
+    (!needsExposedSystems || (exposedSystems.length > 0 && (!exposedSystems.includes("other") || exposedSystemsOther.trim()))) &&
     complianceScope.length > 0 &&
-    airGapped !== null;
+    airGapped !== null &&
+    revenueGenerating !== null &&
+    hadBreach &&
+    topConcern;
 
   const handle = async () => {
     if (!valid) { setError("Please answer every question before continuing"); return; }
@@ -989,10 +1027,15 @@ function BusinessContextStep({ onComplete, onCancel, initialData = null, mode = 
       dataSensitivity,
       availabilityImpact,
       internetFacing,
+      exposedSystems: needsExposedSystems ? exposedSystems : undefined,
+      exposedSystemsOther: needsExposedSystems && exposedSystems.includes("other") ? exposedSystemsOther.trim() : undefined,
       complianceScope,
       airGapped,
       airGappedDetails: airGapped ? airGappedDetails.trim() : undefined,
       hasSecurityTeam,
+      revenueGenerating,
+      hadBreach,
+      topConcern,
     };
     try {
       const res = await fetch(`${API_BASE}/api/business-context`, {
@@ -1067,6 +1110,24 @@ function BusinessContextStep({ onComplete, onCancel, initialData = null, mode = 
             <RadioOption key={o.value} label={o.label} checked={internetFacing === o.value}
               onChange={() => setInternetFacing(o.value)} />
           ))}
+          {needsExposedSystems && (
+            <div style={{ marginTop: 10, paddingLeft: 2 }}>
+              <div style={{ ...qLabelStyle, fontSize: 12 }}>Which system(s) specifically?</div>
+              <div style={{ ...qSubStyle, marginBottom: 8 }}>A public admin panel or remote-access route is a bigger deal than a bare marketing site — select all that apply</div>
+              {EXPOSED_SYSTEM_OPTIONS.map(o => (
+                <CheckboxOption key={o.value} label={o.label} checked={exposedSystems.includes(o.value)}
+                  onChange={() => setExposedSystems(s => toggleMulti(s, o.value))} />
+              ))}
+              {exposedSystems.includes("other") && (
+                <input
+                  style={{ ...qFieldStyle, marginTop: 4 }}
+                  placeholder="Describe the other internet-facing system"
+                  value={exposedSystemsOther}
+                  onChange={e => setExposedSystemsOther(e.target.value)}
+                />
+              )}
+            </div>
+          )}
         </div>
 
         <div style={{ marginBottom: 22 }}>
@@ -1094,6 +1155,32 @@ function BusinessContextStep({ onComplete, onCancel, initialData = null, mode = 
               onChange={e => setAirGappedDetails(e.target.value)}
             />
           )}
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>Does this system directly generate revenue?</div>
+          <div style={qSubStyle}>e.g. an e-commerce checkout, a paid product, a billing system</div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <RadioOption label="Yes" checked={revenueGenerating === true} onChange={() => setRevenueGenerating(true)} />
+            <RadioOption label="No" checked={revenueGenerating === false} onChange={() => setRevenueGenerating(false)} />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>Has this organisation had a security incident or breach before?</div>
+          {HAD_BREACH_OPTIONS.map(o => (
+            <RadioOption key={o.value} label={o.label} checked={hadBreach === o.value}
+              onChange={() => setHadBreach(o.value)} />
+          ))}
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <div style={qLabelStyle}>If this system were compromised, what would concern you most?</div>
+          <div style={qSubStyle}>This is what we weight findings against most heavily</div>
+          {TOP_CONCERN_OPTIONS.map(o => (
+            <RadioOption key={o.value} label={o.label} checked={topConcern === o.value}
+              onChange={() => setTopConcern(o.value)} />
+          ))}
         </div>
 
         <div style={{ marginBottom: 28 }}>
@@ -3041,8 +3128,11 @@ function BusinessContextSummary() {
 
   const sensitivityLabels = data.dataSensitivity.map(v => optionLabel(DATA_SENSITIVITY_OPTIONS, v));
   const complianceLabels = data.complianceScope.map(v => optionLabel(COMPLIANCE_OPTIONS, v));
-  const chip = text => (
-    <span key={text} style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: "#eff6ff", color: "#2563eb" }}>{text}</span>
+  const exposedSystemLabels = (data.exposedSystems || []).map(v =>
+    v === "other" && data.exposedSystemsOther ? data.exposedSystemsOther : optionLabel(EXPOSED_SYSTEM_OPTIONS, v)
+  );
+  const chip = (text, tone = "blue") => (
+    <span key={text} style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20, background: tone === "red" ? "#fef2f2" : "#eff6ff", color: tone === "red" ? "#dc2626" : "#2563eb" }}>{text}</span>
   );
 
   return (
@@ -3060,9 +3150,13 @@ function BusinessContextSummary() {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
         {chip(`Criticality Tier ${data.criticalityTier}`)}
         {chip(optionLabel(INTERNET_FACING_OPTIONS, data.internetFacing))}
+        {exposedSystemLabels.map(l => chip(l))}
         {data.airGapped && chip("Has air-gapped systems")}
-        {sensitivityLabels.map(chip)}
-        {complianceLabels.map(chip)}
+        {sensitivityLabels.map(l => chip(l))}
+        {complianceLabels.map(l => chip(l))}
+        {data.revenueGenerating && chip("Revenue-generating")}
+        {data.topConcern && chip(`Top concern: ${optionLabel(TOP_CONCERN_OPTIONS, data.topConcern)}`)}
+        {data.hadBreach === "yes" && chip("Prior security incident", "red")}
       </div>
     </div>
   );
