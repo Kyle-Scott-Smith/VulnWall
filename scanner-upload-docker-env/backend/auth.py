@@ -30,6 +30,17 @@ need on top of the base users table: auth_provider/google_sub (who a
 Google-linked account belongs to) and notify_on_critical (the Profile
 page's "Email notifications" toggle, persisted here so scanner.py can
 check it server-side rather than trusting client-only state).
+
+Also owns the columns email-OTP MFA (mfa.py) needs: mfa_enabled (the
+Profile page's "Two-factor authentication" toggle -- opt-in, same shape
+as notify_on_critical) plus mfa_code_hash/mfa_code_expires_at/
+mfa_code_attempts, which hold the *current* one-time code for a user with
+MFA turned on (hashed, never stored in plaintext -- see mfa.py). login()
+and google_auth.py's callback() check mfa_enabled after a password/Google
+check succeeds: if it's on, they don't set session["user_id"] yet, they
+hand off to mfa.start_mfa_challenge() and set session["mfa_pending_user_id"]
+instead, and only /api/auth/mfa/verify (mfa.py) promotes that to a real
+signed-in session.
 """
 
 import os
@@ -85,6 +96,14 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
         if "notify_on_critical" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN notify_on_critical INTEGER NOT NULL DEFAULT 0")
+        if "mfa_enabled" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
+        if "mfa_code_hash" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN mfa_code_hash TEXT")
+        if "mfa_code_expires_at" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN mfa_code_expires_at TEXT")
+        if "mfa_code_attempts" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN mfa_code_attempts INTEGER NOT NULL DEFAULT 0")
         # Partial unique index (only enforced where google_sub is actually
         # set) so two different Google accounts can never silently collide
         # onto the same local user row.
@@ -120,6 +139,7 @@ def _user_to_json(row):
         "email": row["email"],
         "authProvider": row["auth_provider"],
         "notifyOnCritical": bool(row["notify_on_critical"]),
+        "mfaEnabled": bool(row["mfa_enabled"]),
     }
 
 
@@ -248,6 +268,29 @@ def login():
     if not row or not check_password_hash(row["password_hash"], password):
         return jsonify({"error": "Invalid email or password"}), 401
 
+    if row["mfa_enabled"]:
+        # Password checked out, but this account has the Profile page's
+        # "Two-factor authentication" toggle on -- don't sign them in yet.
+        # Lazy import: avoids a circular import at module load time (mfa.py
+        # reaches back into this module for DB access), see mfa.py's header.
+        import mfa
+        try:
+            mfa.start_mfa_challenge(row)
+        except EnvironmentError as e:
+            # SMTP isn't configured on this server, so we can't actually
+            # deliver a code -- degrade to signing them straight in rather
+            # than locking the account out entirely (same "not configured
+            # -> skip, don't fail the request" pattern as everywhere else
+            # in this app that reads on an env-var-gated integration).
+            print(f"[auth] MFA enabled for {row['email']} but couldn't send a code: {e}")
+            session.clear()
+            session["user_id"] = row["id"]
+            return jsonify({"status": "signed_in", **_user_to_json(row)})
+
+        session.clear()
+        session["mfa_pending_user_id"] = row["id"]
+        return jsonify({"status": "mfa_required", "email": row["email"]})
+
     session.clear()
     session["user_id"] = row["id"]
     return jsonify({"status": "signed_in", **_user_to_json(row)})
@@ -301,6 +344,32 @@ def update_notifications():
         conn.close()
 
     return jsonify({"notifyOnCritical": enabled})
+
+
+@auth_bp.route("/mfa", methods=["PATCH"])
+def update_mfa():
+    """Body: {"enabled": bool} -- backs the Profile page's "Two-factor
+    authentication" toggle. Same shape as /notifications above. Turning
+    this on doesn't require proving a code right away (there's no session
+    to re-verify mid-request) -- the first real test of it is simply the
+    next time this account signs in, which will now ask for one."""
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "You must be signed in"}), 401
+
+    body = request.get_json(silent=True) or {}
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return jsonify({"error": "'enabled' must be true or false"}), 400
+
+    conn = _get_db()
+    try:
+        conn.execute("UPDATE users SET mfa_enabled = ? WHERE id = ?", (1 if enabled else 0, user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+    return jsonify({"mfaEnabled": enabled})
 
 
 init_db()

@@ -91,6 +91,39 @@ def _build_message(to_email, to_name, critical_vulns, scan_context):
     return msg
 
 
+def _send(msg: EmailMessage):
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+        if SMTP_USE_TLS:
+            server.starttls()
+        if SMTP_USERNAME and SMTP_PASSWORD:
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.send_message(msg)
+
+
+def send_plain_email(to_email: str, subject: str, body: str):
+    """Sends a single plain-text email. Raises EnvironmentError if SMTP
+    isn't configured (see is_configured()), same contract as
+    send_critical_alert() below -- callers should catch that the same way.
+
+    Added so mfa.py's one-time sign-in codes can go out through this
+    module's existing SMTP configuration/connection handling instead of
+    duplicating it in a second module."""
+    if not is_configured():
+        raise EnvironmentError(
+            "Email delivery is not configured on this server. Set SMTP_HOST and "
+            "SMTP_FROM_EMAIL (or SMTP_USERNAME) to enable it."
+        )
+    if not to_email:
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM_EMAIL
+    msg["To"] = to_email
+    msg.set_content(body)
+    _send(msg)
+
+
 def send_critical_alert(to_email: str, to_name: str, critical_vulns: list, scan_context: dict = None):
     """Sends one email listing newly-found Critical vulnerabilities.
 
@@ -108,10 +141,4 @@ def send_critical_alert(to_email: str, to_name: str, critical_vulns: list, scan_
         return
 
     msg = _build_message(to_email, to_name, critical_vulns, scan_context)
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
-        if SMTP_USE_TLS:
-            server.starttls()
-        if SMTP_USERNAME and SMTP_PASSWORD:
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.send_message(msg)
+    _send(msg)

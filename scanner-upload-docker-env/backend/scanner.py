@@ -22,6 +22,7 @@ from jira_integration import jira_bp
 from registry_credentials import registry_bp, get_credentials as get_registry_credentials
 from auth import auth_bp
 from google_auth import google_auth_bp
+from mfa import mfa_bp
 from business_context import business_context_bp, get_business_context
 from tickets import tickets_bp
 from scans import scans_bp
@@ -39,6 +40,7 @@ app.register_blueprint(jira_bp)
 app.register_blueprint(registry_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(google_auth_bp)
+app.register_blueprint(mfa_bp)
 app.register_blueprint(business_context_bp)
 app.register_blueprint(tickets_bp)
 app.register_blueprint(scans_bp)

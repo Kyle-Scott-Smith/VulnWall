@@ -554,7 +554,7 @@ function GoogleAuthButton({ label }) {
   );
 }
 
-function SignIn({ onSignIn, onGoSignUp }) {
+function SignIn({ onSignIn, onGoSignUp, onMfaRequired }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -586,6 +586,11 @@ function SignIn({ onSignIn, onGoSignUp }) {
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error || "Invalid email or password"); return; }
+      // MFA is opt-in per account (Profile page toggle) — a password that
+      // checks out doesn't finish the sign-in when it's on, auth.py holds
+      // the session as "pending" until the emailed code is verified. See
+      // MfaVerify below.
+      if (data.status === "mfa_required") { onMfaRequired(data); return; }
       onSignIn(data);
     } catch {
       setError("Couldn't reach the server. Please try again.");
@@ -741,6 +746,104 @@ function SignUp({ onSignUp, onGoSignIn }) {
         <div style={{ textAlign: "center", fontSize: 13, color: "#6b7280" }}>
           Already have an account?{" "}
           <span onClick={onGoSignIn} style={{ color: "#2563eb", fontWeight: 600, cursor: "pointer" }}>Sign in</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// MFA — email-OTP second factor
+// Shown instead of the dashboard whenever the backend hands back
+// status:"mfa_required" (SignIn, after a correct password) or the browser
+// lands back here with ?mfaRequired=1 (google_auth.py's OAuth callback,
+// for an existing account that has the toggle on). Either way, the
+// backend session only holds session["mfa_pending_user_id"] at this point
+// — /api/auth/mfa/verify (mfa.py) is what actually finishes signing in.
+function MfaVerify({ email, onVerified, onCancel }) {
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [resent, setResent] = useState(false);
+
+  const handle = async () => {
+    if (!code.trim()) { setError("Please enter the code we emailed you"); return; }
+    setError("");
+    setSubmitting(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/mfa/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ code: code.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || "Incorrect code"); return; }
+      onVerified(data);
+    } catch {
+      setError("Couldn't reach the server. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleResend = async () => {
+    setResending(true);
+    setError("");
+    setResent(false);
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/mfa/resend`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || "Couldn't resend the code"); return; }
+      setResent(true);
+    } catch {
+      setError("Couldn't reach the server. Please try again.");
+    } finally {
+      setResending(false);
+    }
+  };
+
+  return (
+    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ width: 380, background: "#fff", borderRadius: 20, padding: 36, boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: "#111", marginBottom: 4 }}>Enter your code</div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 28 }}>
+          {email ? `We emailed a 6-digit code to ${email}.` : "We emailed you a 6-digit code."} It expires in 10 minutes.
+        </div>
+
+        {error && <div style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", padding: "8px 12px", borderRadius: 8, marginBottom: 16 }}>{error}</div>}
+        {resent && !error && <div style={{ fontSize: 12, color: "#166534", background: "#f0fdf4", padding: "8px 12px", borderRadius: 8, marginBottom: 16 }}>A new code is on its way.</div>}
+
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Verification code</div>
+          <input
+            value={code}
+            onChange={e => { setCode(e.target.value.replace(/[^0-9]/g, "").slice(0, 6)); setResent(false); }}
+            placeholder="123456"
+            inputMode="numeric"
+            autoFocus
+            style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 18, letterSpacing: 4, textAlign: "center", fontFamily: "DM Sans, sans-serif", color: "#374151", outline: "none" }}
+          />
+        </div>
+
+        <button
+          onClick={handle}
+          disabled={submitting}
+          style={{ width: "100%", padding: "12px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: submitting ? "default" : "pointer", opacity: submitting ? 0.7 : 1, marginBottom: 16 }}>
+          {submitting ? "Verifying…" : "Verify"}
+        </button>
+
+        <div style={{ textAlign: "center", fontSize: 13, color: "#6b7280" }}>
+          Didn't get it?{" "}
+          <span onClick={resending ? undefined : handleResend} style={{ color: "#2563eb", fontWeight: 600, cursor: resending ? "default" : "pointer" }}>
+            {resending ? "Resending…" : "Resend code"}
+          </span>
+        </div>
+        <div style={{ textAlign: "center", fontSize: 13, color: "#6b7280", marginTop: 8 }}>
+          <span onClick={onCancel} style={{ color: "#6b7280", cursor: "pointer" }}>Back to sign in</span>
         </div>
       </div>
     </div>
@@ -2878,7 +2981,7 @@ function BusinessContextSummary() {
   );
 }
 
-function Profile({ onSignOut, userName, userEmail, notifications, setNotifications, defaultAssign, setDefaultAssign }) {
+function Profile({ onSignOut, userName, userEmail, notifications, setNotifications, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign }) {
 
   return (
     <div className="page-card" style={{ maxWidth: 560, margin: "0 auto", width: "100%" }}>
@@ -2931,6 +3034,17 @@ function Profile({ onSignOut, userName, userEmail, notifications, setNotificatio
             onClick={() => setNotifications(!notifications)}
             style={{ width: 44, height: 24, borderRadius: 99, background: notifications ? "#2563eb" : "#e5e7eb", cursor: "pointer", position: "relative", transition: "background .2s", flexShrink: 0 }}>
             <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: notifications ? 23 : 3, transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+          </div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Two-factor authentication</div>
+            <div style={{ fontSize: 12, color: "#6b7280" }}>Require a code emailed to you at every sign-in</div>
+          </div>
+          <div
+            onClick={() => setMfaEnabled(!mfaEnabled)}
+            style={{ width: 44, height: 24, borderRadius: 99, background: mfaEnabled ? "#2563eb" : "#e5e7eb", cursor: "pointer", position: "relative", transition: "background .2s", flexShrink: 0 }}>
+            <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: mfaEnabled ? 23 : 3, transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
           </div>
         </div>
         <div style={{ padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb" }}>
@@ -3419,6 +3533,13 @@ export default function App() {
   const [userEmail, setUserEmail] = useState("");
   const [notifications, setNotifications] = useState(DEFAULT_PROFILE_PREFS.notifications);
   const [defaultAssign, setDefaultAssign] = useState(DEFAULT_PROFILE_PREFS.defaultAssign);
+  // Two-factor authentication (email-OTP) — Profile page toggle, backed by
+  // users.mfa_enabled (see auth.py). mfaEmail is just a display hint for
+  // the "we emailed a code to ___" copy on MfaVerify, filled in from
+  // whichever flow triggered the challenge (password login's JSON
+  // response, or the ?email= google_auth.py adds to its redirect).
+  const [mfaEnabled, setMfaEnabled] = useState(false);
+  const [mfaEmail, setMfaEmail] = useState("");
   // Only true for the stretch between a fresh signup and finishing the
   // business-context questionnaire — sign-in and session-restore never
   // set this, so returning users go straight to the dashboard.
@@ -3447,8 +3568,17 @@ export default function App() {
     // pattern SignIn already uses for ?authError=); catch it here so SSO
     // signups land in the business-context questionnaire too, instead of
     // skipping straight to the dashboard.
-    const isNewAccount = new URLSearchParams(window.location.search).get("newAccount") === "1";
-    if (isNewAccount) {
+    const searchParams = new URLSearchParams(window.location.search);
+    const isNewAccount = searchParams.get("newAccount") === "1";
+    // A Google sign-in for an existing account with MFA turned on redirects
+    // here instead of completing the session (see google_auth.py's
+    // callback) — same "?flag=1 on the redirect" pattern as ?newAccount=1
+    // and ?authError= above. ?email= is display-only (the "we emailed a
+    // code to ___" copy on MfaVerify); the backend session, not this
+    // param, is what /api/auth/mfa/verify actually trusts.
+    const mfaRequiredFromGoogle = searchParams.get("mfaRequired") === "1";
+    const mfaEmailFromGoogle = searchParams.get("email") || "";
+    if (isNewAccount || mfaRequiredFromGoogle) {
       window.history.replaceState({}, "", window.location.pathname);
     }
 
@@ -3460,16 +3590,21 @@ export default function App() {
           setUserEmail(data.email);
           setAuthed(true);
           const prefs = loadProfilePrefs(data.email);
-          // notifyOnCritical is authoritative from the server (it's what
-          // scanner.py actually checks before sending an alert email) —
-          // only defaultAssign, which has no server-side effect, comes
-          // from localStorage.
+          // notifyOnCritical/mfaEnabled are authoritative from the server
+          // (notifyOnCritical is what scanner.py actually checks before
+          // sending an alert email, mfaEnabled is what login() checks
+          // before requiring a code) — only defaultAssign, which has no
+          // server-side effect, comes from localStorage.
           setNotifications(!!data.notifyOnCritical);
+          setMfaEnabled(!!data.mfaEnabled);
           setDefaultAssign(prefs.defaultAssign);
           if (isNewAccount) {
             setShowBusinessContext(true);
           }
           loadTickets();
+        } else if (mfaRequiredFromGoogle) {
+          setMfaEmail(mfaEmailFromGoogle);
+          setAuthScreen("mfa");
         }
       })
       .catch(() => {})
@@ -3483,6 +3618,20 @@ export default function App() {
   const updateNotifications = (enabled) => {
     setNotifications(enabled);
     fetch(`${API_BASE}/api/auth/notifications`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ enabled }),
+    }).catch(() => {});
+  };
+
+  // Flips the Two-factor authentication toggle and persists it server-side
+  // (see PATCH /api/auth/mfa in auth.py) — same shape as updateNotifications
+  // above. Turning it on doesn't ask for a code right now; it just changes
+  // what this account's next sign-in requires.
+  const updateMfa = (enabled) => {
+    setMfaEnabled(enabled);
+    fetch(`${API_BASE}/api/auth/mfa`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
@@ -3556,22 +3705,51 @@ export default function App() {
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
                   setNotifications(!!data.notifyOnCritical);
+                  setMfaEnabled(!!data.mfaEnabled);
                   setDefaultAssign(prefs.defaultAssign);
                   loadTickets();
                 }}
                 onGoSignUp={() => setAuthScreen("signup")}
+                onMfaRequired={data => {
+                  setMfaEmail(data.email || "");
+                  setAuthScreen("mfa");
+                }}
               />
-            : <SignUp
+            : authScreen === "signup"
+            ? <SignUp
                 onSignUp={data => {
                   setUserName(data.name);
                   setUserEmail(data.email);
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
                   setNotifications(!!data.notifyOnCritical);
+                  setMfaEnabled(!!data.mfaEnabled);
                   setDefaultAssign(prefs.defaultAssign);
                   setShowBusinessContext(true);
                 }}
                 onGoSignIn={() => setAuthScreen("signin")}
+              />
+            : <MfaVerify
+                email={mfaEmail}
+                onVerified={data => {
+                  setUserName(data.name);
+                  setUserEmail(data.email);
+                  setAuthed(true);
+                  const prefs = loadProfilePrefs(data.email);
+                  setNotifications(!!data.notifyOnCritical);
+                  setMfaEnabled(!!data.mfaEnabled);
+                  setDefaultAssign(prefs.defaultAssign);
+                  loadTickets();
+                }}
+                onCancel={() => {
+                  // Clears the server-side "pending" session (see
+                  // /api/auth/logout in auth.py — session.clear() wipes
+                  // mfa_pending_user_id the same as it would user_id) so a
+                  // half-finished sign-in doesn't linger.
+                  fetch(`${API_BASE}/api/auth/logout`, { method: "POST", credentials: "include" }).catch(() => {});
+                  setMfaEmail("");
+                  setAuthScreen("signin");
+                }}
               />
           }
         </div>
@@ -3613,12 +3791,15 @@ export default function App() {
               setAuthScreen("signin");
               setUserName("");
               setUserEmail("");
+              setMfaEmail("");
               setShowBusinessContext(false);
             }}
             userName={userName}
             userEmail={userEmail}
             notifications={notifications}
             setNotifications={updateNotifications}
+            mfaEnabled={mfaEnabled}
+            setMfaEnabled={updateMfa}
             defaultAssign={defaultAssign}
             setDefaultAssign={setDefaultAssign}
           />

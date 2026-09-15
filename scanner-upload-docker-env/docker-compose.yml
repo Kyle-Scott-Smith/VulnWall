@@ -51,6 +51,23 @@ services:
         condition: service_healthy
       ollama-pull:
         condition: service_completed_successfully
+      mailpit:
+        condition: service_started
+
+  # Local dev SMTP catcher (email_notifications.py / mfa.py) — a fake mail
+  # server that just holds whatever the backend sends instead of actually
+  # delivering it. Point backend/.env's SMTP_HOST at "mailpit" (resolves via
+  # Docker's internal DNS, same trick as "ollama" above) and every critical-
+  # finding alert / MFA code lands here instead of a real inbox — no
+  # account, password, or provider-side anti-abuse check involved, so it
+  # never gets rejected the way a real Gmail/Outlook account can. View
+  # what's "sent" at http://localhost:8025. Not a substitute for a real
+  # mail provider in an actual deployment — it's dev/demo-only, on purpose.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"   # web UI — open this in a browser to read "sent" mail
+      - "1025:1025"   # SMTP port the backend connects to
 
   ollama:
     image: ollama/ollama:latest
