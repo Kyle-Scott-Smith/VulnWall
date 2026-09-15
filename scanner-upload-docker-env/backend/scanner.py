@@ -20,7 +20,7 @@ from scanners.registry import SCANNERS, detect_scanner, get_scanner
 from scanners.utils import dedupe_by_cve, sort_by_severity
 from jira_integration import jira_bp
 from registry_credentials import registry_bp, get_credentials as get_registry_credentials
-from auth import auth_bp
+from auth import auth_bp, require_role
 from google_auth import google_auth_bp
 from mfa import mfa_bp
 from business_context import business_context_bp, get_business_context
@@ -123,6 +123,7 @@ def list_scanners():
 
 
 @app.route("/api/upload-scan", methods=["POST"])
+@require_role("admin", "analyst")
 def upload_scan():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -167,6 +168,7 @@ def upload_scan():
 
 
 @app.route("/api/scan", methods=["POST"])
+@require_role("admin", "analyst")
 def trigger_scan():
     body = request.get_json(silent=True) or {}
     scanner_name = body.get("scanner")
@@ -212,6 +214,7 @@ def trigger_scan():
 
 
 @app.route("/api/analyze", methods=["POST"])
+@require_role("admin", "analyst")
 def analyze():
     body = request.get_json(force=True, silent=True) or {}
     vulnerabilities = body.get("vulnerabilities")

@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Blueprint, jsonify, redirect, request, session
 
-from auth import _get_db
+from auth import _get_db, require_role
 
 jira_bp = Blueprint("jira", __name__, url_prefix="/api/jira")
 
@@ -193,14 +193,13 @@ def status():
 
 
 @jira_bp.route("/connect", methods=["GET"])
+@require_role("admin", "analyst")
 def connect():
     """Entry point for the 'Connect Jira' button — redirects the browser
     to Atlassian's real authorization screen."""
     error = _not_configured()
     if error:
         return error
-    if not _session_key():
-        return jsonify({"error": "You must be signed in to connect Jira"}), 401
 
     state = secrets.token_urlsafe(24)
     session["jira_oauth_state"] = state
@@ -316,6 +315,7 @@ def callback():
 
 
 @jira_bp.route("/disconnect", methods=["POST"])
+@require_role("admin", "analyst")
 def disconnect():
     user_id = _session_key()
     if user_id:
@@ -414,6 +414,7 @@ def _ensure_project_exists(record, project_key):
 
 
 @jira_bp.route("/create-ticket", methods=["POST"])
+@require_role("admin", "analyst")
 def create_ticket():
     """Push one ticket to the connected Jira site.
 

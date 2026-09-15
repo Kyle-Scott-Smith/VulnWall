@@ -460,14 +460,31 @@ function Stepper({ currentStep }) {
 }
 
 //nav bar
-function Nav({ activeTab, setActiveTab }) {
+// Role-based access control (see auth.py's `role` column / require_role()):
+// a Viewer is read-only, so it never sees the "Upload Scan" tab — the
+// whole upload/analyze/select/generate-ticket wizard lives there, and the
+// endpoints behind it (/api/upload-scan, /api/scan, /api/analyze, POST
+// /api/scans) are also blocked server-side for a Viewer, so hiding the tab
+// isn't just cosmetic. Admin additionally gets a "Users" tab (GET/PATCH
+// /api/auth/users*) that nobody else can see or reach.
+const NAV_TAB_LABELS = { dashboard: "Dashboard", "upload-scan": "Upload Scan", history: "Scan History", tickets: "Tickets", users: "Users" };
+const ROLE_LABELS = { admin: "Admin", analyst: "Security Analyst", viewer: "Viewer" };
+
+function navTabsForRole(role) {
+  const tabs = ["dashboard", "upload-scan", "history", "tickets"];
+  if (role === "viewer") return tabs.filter(t => t !== "upload-scan");
+  if (role === "admin") return [...tabs, "users"];
+  return tabs;
+}
+
+function Nav({ activeTab, setActiveTab, role }) {
   return (
     <nav className="nav">
       <div className="nav-links">
-        {["dashboard", "upload-scan", "history", "tickets"].map(tab => (
+        {navTabsForRole(role).map(tab => (
           <button key={tab} className={`nav-btn ${activeTab === tab ? "active" : ""}`} onClick={() => setActiveTab(tab)}>
             <span>✦</span>
-            {tab === "dashboard" ? "Dashboard" : tab === "upload-scan" ? "Upload Scan" : tab === "history" ? "Scan History" : "Tickets"}
+            {NAV_TAB_LABELS[tab]}
           </button>
         ))}
       </div>
@@ -2642,7 +2659,7 @@ const ticketData = [
   { id: "T-105", cve: "CVE-2026-12012", title: "nginx HTTP/3 use-after-free", priority: "P2", status: "Closed", assigned: "Security Team", date: "24-04-2026", cvss: 6.3, confidence: 77, fixes: cveDetails["CVE-2026-12012"]?.fixes || [], why: cveDetails["CVE-2026-12012"]?.why || "" },
 ];
 
-function TicketList({ tickets: initialTickets }) {
+function TicketList({ tickets: initialTickets, canEdit = true }) {
   const [statusFilter, setStatusFilter] = useState("All");
   const [priorityFilter, setPriorityFilter] = useState("All");
   const [tickets, setTickets] = useState(initialTickets || []);
@@ -2840,11 +2857,13 @@ function TicketList({ tickets: initialTickets }) {
           {/* Buttons */}
           {!editing ? (
             <div style={{ display: "flex", gap: 8 }}>
-              <button
-                onClick={() => { setEditing(true); setEditForm({ status: selectedTicket.status, assigned: selectedTicket.assigned }); }}
-                style={{ flex: 1, padding: "8px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
-                Edit
-              </button>
+              {canEdit && (
+                <button
+                  onClick={() => { setEditing(true); setEditForm({ status: selectedTicket.status, assigned: selectedTicket.assigned }); }}
+                  style={{ flex: 1, padding: "8px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
+                  Edit
+                </button>
+              )}
               <button
                 onClick={() => setSelectedTicket(null)}
                 style={{ flex: 1, padding: "8px", borderRadius: 20, border: "none", background: "#f3f4f6", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
@@ -3083,7 +3102,7 @@ function RegistryConnect() {
 // button that swaps in the same BusinessContextStep form used at signup
 // (prefilled via `initialData`). Fetches its own data so Profile doesn't
 // need to carry it around as top-level app state.
-function BusinessContextSummary() {
+function BusinessContextSummary({ canEdit = true }) {
   const [data, setData] = useState({ loading: true });
   const [editing, setEditing] = useState(false);
 
@@ -3117,11 +3136,13 @@ function BusinessContextSummary() {
           <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Business context</div>
           <div style={{ fontSize: 12, color: "#6b7280" }}>Not set yet — helps us prioritise vulnerabilities by business impact</div>
         </div>
-        <button
-          onClick={() => setEditing(true)}
-          style={{ padding: "8px 14px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
-          Add answers
-        </button>
+        {canEdit && (
+          <button
+            onClick={() => setEditing(true)}
+            style={{ padding: "8px 14px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+            Add answers
+          </button>
+        )}
       </div>
     );
   }
@@ -3141,11 +3162,13 @@ function BusinessContextSummary() {
         <div style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>
           {data.sector === "other" ? data.sectorOther : optionLabel(SECTOR_OPTIONS, data.sector)}
         </div>
-        <button
-          onClick={() => setEditing(true)}
-          style={{ padding: "6px 14px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151", flexShrink: 0 }}>
-          Edit
-        </button>
+        {canEdit && (
+          <button
+            onClick={() => setEditing(true)}
+            style={{ padding: "6px 14px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151", flexShrink: 0 }}>
+            Edit
+          </button>
+        )}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
         {chip(`Criticality Tier ${data.criticalityTier}`)}
@@ -3162,7 +3185,94 @@ function BusinessContextSummary() {
   );
 }
 
-function Profile({ onSignOut, userName, userEmail, notifications, setNotifications, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign }) {
+//Users (Admin-only account directory — GET/PATCH /api/auth/users*, both
+// gated server-side to role="admin" by require_role(); the "users" nav tab
+// itself only renders for an Admin (see navTabsForRole), so this component
+// is only ever mounted for one, but the backend is the real enforcement.
+function UsersManage({ currentUserEmail }) {
+  const [users, setUsers] = useState(null); // null while loading
+  const [loadError, setLoadError] = useState(false);
+  const [savingId, setSavingId] = useState(null);
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/auth/users`, { credentials: "include" })
+      .then(res => { if (!res.ok) throw new Error(); return res.json(); })
+      .then(data => setUsers(Array.isArray(data) ? data : []))
+      .catch(() => setLoadError(true));
+  }, []);
+
+  // Changes one account's role. Applied optimistically-ish: the select
+  // itself already shows the new value the moment it's picked (that's
+  // just how a controlled <select> works), this just persists it and
+  // rolls the dropdown back to the server's answer if the request fails
+  // — most commonly because it would have removed the last Admin (see
+  // update_user_role in auth.py), which this form doesn't try to predict
+  // client-side since only the server can know the current Admin count.
+  const changeRole = (user, newRole) => {
+    setSaveError("");
+    setSavingId(user.id);
+    fetch(`${API_BASE}/api/auth/users/${user.id}/role`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: newRole }),
+    })
+      .then(res => res.json().then(data => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          setSaveError(data.error || "Couldn't update that role");
+          return;
+        }
+        setUsers(prev => prev.map(u => (u.id === user.id ? { ...u, role: data.role } : u)));
+      })
+      .catch(() => setSaveError("Couldn't update that role"))
+      .finally(() => setSavingId(null));
+  };
+
+  return (
+    <div className="page-card" style={{ maxWidth: 720, margin: "0 auto", width: "100%" }}>
+      <div style={{ fontSize: 18, fontWeight: 700, color: "#111", marginBottom: 4 }}>Users</div>
+      <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 24 }}>Manage who has access to this workspace and what they can do</div>
+
+      {loadError && (
+        <div style={{ fontSize: 13, color: "#dc2626", marginBottom: 16 }}>Couldn't load the account list. Try refreshing the page.</div>
+      )}
+      {saveError && (
+        <div style={{ fontSize: 13, color: "#dc2626", marginBottom: 16 }}>{saveError}</div>
+      )}
+
+      {users === null ? (
+        <div style={{ fontSize: 13, color: "#9ca3af" }}>Loading…</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {users.map(u => (
+            <div key={u.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {u.name}{" "}
+                  {u.email === currentUserEmail && <span style={{ color: "#9ca3af", fontWeight: 500 }}>(you)</span>}
+                </div>
+                <div style={{ fontSize: 12, color: "#6b7280" }}>{u.email}</div>
+              </div>
+              <select
+                value={u.role}
+                disabled={savingId === u.id}
+                onChange={e => changeRole(u, e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 12, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none", flexShrink: 0 }}>
+                <option value="admin">Admin</option>
+                <option value="analyst">Security Analyst</option>
+                <option value="viewer">Viewer</option>
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Profile({ onSignOut, userName, userEmail, role, notifications, setNotifications, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign }) {
 
   return (
     <div className="page-card" style={{ maxWidth: 560, margin: "0 auto", width: "100%" }}>
@@ -3176,7 +3286,7 @@ function Profile({ onSignOut, userName, userEmail, notifications, setNotificatio
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, color: "#111" }}>{userName || "User"}</div>
           <div style={{ fontSize: 13, color: "#6b7280" }}>{userEmail || "user@organisation.com"}</div>
-          <div style={{ fontSize: 12, color: "#2563eb", fontWeight: 600, marginTop: 2 }}>Security Analyst</div>
+          <div style={{ fontSize: 12, color: "#2563eb", fontWeight: 600, marginTop: 2 }}>{ROLE_LABELS[role] || "Security Analyst"}</div>
         </div>
       </div>
 
@@ -3190,7 +3300,7 @@ function Profile({ onSignOut, userName, userEmail, notifications, setNotificatio
             </div>
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Role</div>
-              <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>Security Analyst</div>
+              <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>{ROLE_LABELS[role] || "Security Analyst"}</div>
             </div>
           </div>
           <div>
@@ -3244,16 +3354,22 @@ function Profile({ onSignOut, userName, userEmail, notifications, setNotificatio
 
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Business context</div>
-        <BusinessContextSummary />
+        <BusinessContextSummary canEdit={role !== "viewer"} />
       </div>
 
-      <div style={{ marginBottom: 24 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Integrations</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <JiraConnect />
-          <RegistryConnect />
+      {/* Viewer is read-only (see auth.py's require_role gating on
+          /api/jira/connect|disconnect and /api/registry/connect|disconnect)
+          — hiding this section for them avoids a "Connect" button that
+          would just 403 if clicked. */}
+      {role !== "viewer" && (
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Integrations</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <JiraConnect />
+            <RegistryConnect />
+          </div>
         </div>
-      </div>
+      )}
 
       <button
         onClick={onSignOut}
@@ -3712,6 +3828,13 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
+  // Role-based access control (see auth.py's `role` column / require_role()
+  // and Nav's navTabsForRole) — "admin" | "analyst" | "viewer", set from
+  // whichever user object last came back from the backend (session
+  // restore, sign-in, sign-up, or MFA verify all return one). Defaults to
+  // "analyst" only as a display fallback for the brief window before the
+  // first of those responses arrives; every real gate lives server-side.
+  const [role, setRole] = useState("analyst");
   const [notifications, setNotifications] = useState(DEFAULT_PROFILE_PREFS.notifications);
   const [defaultAssign, setDefaultAssign] = useState(DEFAULT_PROFILE_PREFS.defaultAssign);
   // Two-factor authentication (email-OTP) — Profile page toggle, backed by
@@ -3778,6 +3901,7 @@ export default function App() {
           // server-side effect, comes from localStorage.
           setNotifications(!!data.notifyOnCritical);
           setMfaEnabled(!!data.mfaEnabled);
+          setRole(data.role || "analyst");
           setDefaultAssign(prefs.defaultAssign);
           if (isNewAccount) {
             setShowBusinessContext(true);
@@ -3887,6 +4011,7 @@ export default function App() {
                   const prefs = loadProfilePrefs(data.email);
                   setNotifications(!!data.notifyOnCritical);
                   setMfaEnabled(!!data.mfaEnabled);
+                  setRole(data.role || "analyst");
                   setDefaultAssign(prefs.defaultAssign);
                   loadTickets();
                 }}
@@ -3905,6 +4030,7 @@ export default function App() {
                   const prefs = loadProfilePrefs(data.email);
                   setNotifications(!!data.notifyOnCritical);
                   setMfaEnabled(!!data.mfaEnabled);
+                  setRole(data.role || "analyst");
                   setDefaultAssign(prefs.defaultAssign);
                   setShowBusinessContext(true);
                 }}
@@ -3919,6 +4045,7 @@ export default function App() {
                   const prefs = loadProfilePrefs(data.email);
                   setNotifications(!!data.notifyOnCritical);
                   setMfaEnabled(!!data.mfaEnabled);
+                  setRole(data.role || "analyst");
                   setDefaultAssign(prefs.defaultAssign);
                   loadTickets();
                 }}
@@ -3953,16 +4080,22 @@ export default function App() {
     <>
       <style>{css}</style>
       <div className="shell">
-        <Nav activeTab={activeTab} setActiveTab={goToTab} />
+        <Nav activeTab={activeTab} setActiveTab={goToTab} role={role} />
 
-        {activeTab === "upload-scan" && (
+        {/* Viewer never sees the Upload Scan tab (see navTabsForRole), but
+            guard the content too in case a role change lands mid-session
+            while this tab is already open — the backend blocks the
+            underlying endpoints either way, this just avoids showing a
+            wizard step that would fail on submit. */}
+        {activeTab === "upload-scan" && role !== "viewer" && (
           <Stepper currentStep={cveId ? prevStep : uploadStep} />
         )}
 
         {activeTab === "dashboard" && <Dashboard />}
-        {activeTab === "upload-scan" && renderUploadContent()}
+        {activeTab === "upload-scan" && role !== "viewer" && renderUploadContent()}
         {activeTab === "history" && <ScanHistory />}
-        {activeTab === "tickets" && <TicketList tickets={liveTickets} />}
+        {activeTab === "tickets" && <TicketList tickets={liveTickets} canEdit={role !== "viewer"} />}
+        {activeTab === "users" && role === "admin" && <UsersManage currentUserEmail={userEmail} />}
         {activeTab === "profile" && (
           <Profile
             onSignOut={() => {
@@ -3973,10 +4106,12 @@ export default function App() {
               setUserName("");
               setUserEmail("");
               setMfaEmail("");
+              setRole("analyst");
               setShowBusinessContext(false);
             }}
             userName={userName}
             userEmail={userEmail}
+            role={role}
             notifications={notifications}
             setNotifications={updateNotifications}
             mfaEnabled={mfaEnabled}

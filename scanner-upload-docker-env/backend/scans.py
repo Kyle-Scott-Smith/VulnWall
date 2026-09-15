@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request, session
 
 import email_notifications
-from auth import _get_db, get_user_by_id
+from auth import _get_db, get_user_by_id, require_role
 
 scans_bp = Blueprint("scans", __name__, url_prefix="/api/scans")
 
@@ -171,6 +171,7 @@ def _maybe_send_critical_alert(user_id, scanner_name, target, new_critical_vulns
 
 
 @scans_bp.route("", methods=["POST"])
+@require_role("admin", "analyst")
 def complete_scan():
     """Records a scan as completed — and, if warranted, fires the critical-
     finding email alert (see _maybe_send_critical_alert above).
@@ -188,8 +189,9 @@ def complete_scan():
     vulnerability list (post-dedupe/Tenable-cross-reference/AI-analysis)
     the frontend has been holding onto since upload/scan, same shape
     /api/upload-scan, /api/scan, and /api/analyze already return.
-    A no-op (still returns 200) if nobody's signed in, same convention
-    record_scan() itself already follows.
+    Gated to Admin/Analyst (see auth.require_role) — a Viewer can't reach
+    this because the whole upload/scan wizard that leads here is already
+    blocked for them at /api/upload-scan and /api/scan.
     """
     body = request.get_json(force=True, silent=True) or {}
     vulnerabilities = body.get("vulnerabilities")

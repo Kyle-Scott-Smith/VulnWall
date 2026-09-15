@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request, session
 
-from auth import _get_db
+from auth import _get_db, require_role
 
 tickets_bp = Blueprint("tickets", __name__, url_prefix="/api/tickets")
 
@@ -119,6 +119,7 @@ def list_tickets():
 
 
 @tickets_bp.route("", methods=["POST"])
+@require_role("admin", "analyst")
 def create_tickets():
     """Bulk-save tickets. Body: array of {id, cve, title, priority, status,
     assigned, date, cvss, confidence, fixes, why} — the exact shape
@@ -180,6 +181,7 @@ def create_tickets():
 
 
 @tickets_bp.route("/<ticket_ref>", methods=["PATCH"])
+@require_role("admin", "analyst")
 def update_ticket(ticket_ref):
     """Body: {status, assigned} — either or both. Matches the fields
     TicketList's edit form actually lets a user change."""
@@ -244,7 +246,15 @@ def sync_with_jira():
     page loads / on a refresh button, not continuously.
 
     Only tickets already linked to a Jira issue are touched — tickets
-    created without pushing to Jira are left alone."""
+    created without pushing to Jira are left alone.
+
+    Deliberately NOT role-gated like create_tickets()/update_ticket()
+    above, even though it does write to the DB: TicketList calls this
+    automatically every time the Tickets page loads (see App.jsx), and it
+    only ever mirrors Jira's own status back locally rather than letting
+    the caller set anything themselves — so a Viewer refreshing the page
+    should still see accurate, current statuses rather than a stale view
+    or a sync-failed error on every visit."""
     user_id = _require_login()
     if not user_id:
         return jsonify({"error": "You must be signed in"}), 401

@@ -41,6 +41,29 @@ check succeeds: if it's on, they don't set session["user_id"] yet, they
 hand off to mfa.start_mfa_challenge() and set session["mfa_pending_user_id"]
 instead, and only /api/auth/mfa/verify (mfa.py) promotes that to a real
 signed-in session.
+
+Also owns role-based access control: the `role` column (one of
+VALID_ROLES) and the require_role() decorator every other blueprint
+imports from here to gate its mutating endpoints. Three roles:
+  - viewer  : read-only. Can see the dashboard, scan history, and
+              tickets, but can't run a scan, generate/edit/sync
+              tickets, or connect Jira/a registry.
+  - analyst : viewer's access plus everything scan/ticket-related --
+              the "normal" working account. This app's original
+              (pre-RBAC) behavior for a signed-in user.
+  - admin   : analyst's access plus the account directory
+              (GET/PATCH /api/auth/users*) -- the only role that can see
+              every account on this server and change what role they
+              have.
+Assignment: there's no invite flow -- an account gets a role at
+signup/first-Google-sign-in, and only an Admin can change it afterwards
+(see update_user_role() below). Bootstrapping who that first Admin even
+is works two ways: on a brand new database, whichever account is created
+first (signup or Google) is automatically made Admin (see
+_bootstrap_role()); on a database that already existed before this
+feature shipped, init_db()'s migration promotes whichever account is
+oldest, so there's never a moment where a real install has zero Admins
+and no way back in.
 """
 
 import os
@@ -48,6 +71,7 @@ import re
 import secrets
 import sqlite3
 from datetime import datetime, timezone
+from functools import wraps
 
 from flask import Blueprint, jsonify, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -60,6 +84,9 @@ DB_PATH = os.environ.get(
 )
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+VALID_ROLES = ("admin", "analyst", "viewer")
+DEFAULT_ROLE = "analyst"
 
 
 def _get_db():
@@ -85,11 +112,28 @@ def init_db():
                 name          TEXT NOT NULL,
                 email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT 'analyst',
                 created_at    TEXT NOT NULL
             )
             """
         )
         existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "role" not in existing_cols:
+            conn.execute(f"ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT '{DEFAULT_ROLE}'")
+            # This is a database that existed before RBAC shipped, so
+            # every row just landed as a plain Analyst -- including
+            # whoever's been using this server as if they owned it.
+            # Promote the oldest account (first ever created) to Admin so
+            # there's always at least one account that can reach the new
+            # Manage Users screen, instead of everyone being downgraded
+            # with no way to change anyone's role, including their own.
+            conn.execute(
+                """
+                UPDATE users SET role = 'admin' WHERE id = (
+                    SELECT id FROM users ORDER BY created_at ASC, id ASC LIMIT 1
+                )
+                """
+            )
         if "auth_provider" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN auth_provider TEXT NOT NULL DEFAULT 'local'")
         if "google_sub" not in existing_cols:
@@ -140,7 +184,49 @@ def _user_to_json(row):
         "authProvider": row["auth_provider"],
         "notifyOnCritical": bool(row["notify_on_critical"]),
         "mfaEnabled": bool(row["mfa_enabled"]),
+        "role": row["role"],
     }
+
+
+def _bootstrap_role(conn):
+    """What role a brand new account should get, using the SAME open
+    connection the caller is about to INSERT with (so the COUNT below and
+    the insert that follows it can't race against a concurrent signup and
+    both see zero rows). The very first account ever created on this
+    database becomes Admin -- otherwise nobody could ever reach the
+    account directory to promote anyone. Every account after that is a
+    plain Analyst until an Admin changes it from the Manage Users screen."""
+    count = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    return "admin" if count == 0 else DEFAULT_ROLE
+
+
+def require_role(*roles):
+    """Decorator for routes that need not just a signed-in session but a
+    specific role on the account. Usage: @require_role("admin") or
+    @require_role("admin", "analyst"). Returns 401 if nobody's signed in,
+    403 if their role isn't one of `roles`, otherwise calls the wrapped
+    view normally.
+
+    Centralizes what tickets.py/business_context.py/registry_credentials.py/
+    jira_integration.py's own `_require_login()` helpers already do for
+    the "not signed in" half of this check, so every blueprint that also
+    needs a role check shares one implementation and one error shape
+    instead of re-deriving it per file."""
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            user_id = session.get("user_id")
+            if not user_id:
+                return jsonify({"error": "You must be signed in"}), 401
+            row = get_user_by_id(user_id)
+            if not row:
+                session.clear()
+                return jsonify({"error": "You must be signed in"}), 401
+            if row["role"] not in roles:
+                return jsonify({"error": "Your account role doesn't have permission to do this"}), 403
+            return view(*args, **kwargs)
+        return wrapped
+    return decorator
 
 
 def get_user_by_id(user_id):
@@ -181,12 +267,13 @@ def create_google_user(name, email, google_sub):
     placeholder_hash = generate_password_hash(secrets.token_urlsafe(32))
     conn = _get_db()
     try:
+        role = _bootstrap_role(conn)
         cur = conn.execute(
             """
-            INSERT INTO users (name, email, password_hash, created_at, auth_provider, google_sub, notify_on_critical)
-            VALUES (?, ?, ?, ?, 'google', ?, 0)
+            INSERT INTO users (name, email, password_hash, created_at, auth_provider, google_sub, notify_on_critical, role)
+            VALUES (?, ?, ?, ?, 'google', ?, 0, ?)
             """,
-            (name, email, placeholder_hash, now, google_sub),
+            (name, email, placeholder_hash, now, google_sub, role),
         )
         conn.commit()
         return cur.lastrowid
@@ -225,9 +312,10 @@ def signup():
 
     conn = _get_db()
     try:
+        role = _bootstrap_role(conn)
         cur = conn.execute(
-            "INSERT INTO users (name, email, password_hash, created_at, notify_on_critical) VALUES (?, ?, ?, ?, 0)",
-            (name, email, password_hash, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO users (name, email, password_hash, created_at, notify_on_critical, role) VALUES (?, ?, ?, ?, 0, ?)",
+            (name, email, password_hash, datetime.now(timezone.utc).isoformat(), role),
         )
         conn.commit()
         user_id = cur.lastrowid
@@ -238,7 +326,13 @@ def signup():
 
     session.clear()
     session["user_id"] = user_id
-    return jsonify({"status": "signed_up", "name": name, "email": email})
+    # role wasn't returned here pre-RBAC (there was nothing to return) —
+    # now that every account has one, echo it back the same way login()
+    # already does via _user_to_json, so the frontend knows immediately
+    # whether this brand new account is an Admin (the very first account
+    # on this server) or an Analyst (everyone after), without a second
+    # round trip to /api/auth/me.
+    return jsonify({"status": "signed_up", "name": name, "email": email, "role": role})
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -370,6 +464,64 @@ def update_mfa():
         conn.close()
 
     return jsonify({"mfaEnabled": enabled})
+
+
+def _admin_user_to_json(row):
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "email": row["email"],
+        "role": row["role"],
+        "authProvider": row["auth_provider"],
+        "createdAt": row["created_at"],
+    }
+
+
+@auth_bp.route("/users", methods=["GET"])
+@require_role("admin")
+def list_users():
+    """Admin-only account directory -- every account on this server and
+    its current role, backing the Profile page's 'Manage users' panel."""
+    conn = _get_db()
+    try:
+        rows = conn.execute("SELECT * FROM users ORDER BY created_at ASC").fetchall()
+    finally:
+        conn.close()
+    return jsonify([_admin_user_to_json(r) for r in rows])
+
+
+@auth_bp.route("/users/<int:target_id>/role", methods=["PATCH"])
+@require_role("admin")
+def update_user_role(target_id):
+    """Body: {"role": "admin"|"analyst"|"viewer"}. Refuses to demote the
+    last remaining Admin (whether that's someone else or the caller
+    themselves) -- doing so would strand the account directory with
+    nobody left who can open it to fix the mistake."""
+    body = request.get_json(silent=True) or {}
+    role = body.get("role")
+    if role not in VALID_ROLES:
+        return jsonify({"error": f"role must be one of {', '.join(VALID_ROLES)}"}), 400
+
+    conn = _get_db()
+    try:
+        target = conn.execute("SELECT * FROM users WHERE id = ?", (target_id,)).fetchone()
+        if not target:
+            return jsonify({"error": "User not found"}), 404
+
+        if target["role"] == "admin" and role != "admin":
+            admin_count = conn.execute(
+                "SELECT COUNT(*) AS n FROM users WHERE role = 'admin'"
+            ).fetchone()["n"]
+            if admin_count <= 1:
+                return jsonify({"error": "Can't remove the last Admin. Promote someone else first."}), 400
+
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, target_id))
+        conn.commit()
+        updated = conn.execute("SELECT * FROM users WHERE id = ?", (target_id,)).fetchone()
+    finally:
+        conn.close()
+
+    return jsonify(_admin_user_to_json(updated))
 
 
 init_db()

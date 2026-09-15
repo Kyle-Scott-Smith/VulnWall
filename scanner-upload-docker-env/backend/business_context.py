@@ -33,7 +33,7 @@ from flask import Blueprint, jsonify, request, session
 # Reuse the exact same DB file and connection helper as auth.py so this
 # lives in the same SQLite database as the users table (and so the two
 # blueprints can't silently drift onto different files).
-from auth import DB_PATH, _get_db  # noqa: F401
+from auth import DB_PATH, _get_db, require_role  # noqa: F401
 
 business_context_bp = Blueprint(
     "business_context", __name__, url_prefix="/api/business-context"
@@ -282,10 +282,13 @@ def _validate(body):
 
 
 @business_context_bp.route("", methods=["POST"])
+@require_role("admin", "analyst")
 def submit():
-    user_id = _require_login()
-    if not user_id:
-        return jsonify({"error": "You must be signed in"}), 401
+    # require_role() above already confirmed there's a signed-in Admin/
+    # Analyst session, so this is always set — kept as a local rather than
+    # re-deriving it, since the rest of this function was written against
+    # user_id before the decorator existed.
+    user_id = session.get("user_id")
 
     body = request.get_json(silent=True) or {}
     error = _validate(body)

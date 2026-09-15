@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request, session
 
-from auth import _get_db
+from auth import _get_db, require_role
 
 registry_bp = Blueprint("registry", __name__, url_prefix="/api/registry")
 
@@ -107,12 +107,11 @@ def status():
 
 
 @registry_bp.route("/connect", methods=["POST"])
+@require_role("admin", "analyst")
 def connect():
     """Store the signed-in account's private registry credentials.
     Body: {"url": "ghcr.io", "username": "...", "password": "..."}"""
     user_id = _session_key()
-    if not user_id:
-        return jsonify({"error": "You must be signed in to connect a registry"}), 401
 
     body = request.get_json(silent=True) or {}
     url = (body.get("url") or "").strip()
@@ -145,6 +144,7 @@ def connect():
 
 
 @registry_bp.route("/disconnect", methods=["POST"])
+@require_role("admin", "analyst")
 def disconnect():
     user_id = _session_key()
     if user_id:
