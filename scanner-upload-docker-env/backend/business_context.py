@@ -76,31 +76,6 @@ COMPLIANCE_OPTIONS = {
 
 INTERNET_FACING_OPTIONS = {"public", "internal", "mixed"}
 
-# Only asked/required when internetFacing is "public" or "mixed" — which
-# specific system(s) are reachable, since a public marketing site and a
-# public admin panel carry very different risk despite both being "public".
-EXPOSED_SYSTEM_OPTIONS = {
-    "website",
-    "admin_panel",
-    "remote_access",  # VPN/SSH/RDP/etc.
-    "api",
-    "other",
-}
-
-# "What would concern you most if this were compromised?" — the anchor
-# question: instead of inferring what an org values from sector/compliance
-# alone, ask directly. See ai_analysis.py's compute_business_priority_score,
-# which amplifies whichever existing bonus matches this answer.
-TOP_CONCERN_OPTIONS = {
-    "revenue_loss",
-    "customer_trust",
-    "legal_regulatory",
-    "physical_safety",
-    "operational_downtime",
-}
-
-HAD_BREACH_OPTIONS = {"yes", "no", "not_sure"}
-
 SECTOR_OPTIONS = {
     "healthcare",
     "banking_finance",
@@ -116,12 +91,8 @@ SECTOR_OPTIONS = {
 
 
 def init_business_context_db():
-    """Creates the business_context table if it doesn't exist yet, and
-    migrates it forward if it already exists from before the breach
-    history / top concern / revenue / exposed-systems questions were added
-    — same ALTER-TABLE-if-missing pattern auth.py uses for its Google
-    Sign-In / email-alert columns. Called once at import time (see bottom
-    of file), same as auth.init_db()."""
+    """Creates the business_context table if it doesn't exist yet. Called
+    once at import time (see bottom of file), same as auth.init_db()."""
     conn = _get_db()
     try:
         conn.execute(
@@ -143,17 +114,6 @@ def init_business_context_db():
             )
             """
         )
-        existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(business_context)").fetchall()}
-        if "had_breach" not in existing_cols:
-            conn.execute("ALTER TABLE business_context ADD COLUMN had_breach TEXT")
-        if "top_concern" not in existing_cols:
-            conn.execute("ALTER TABLE business_context ADD COLUMN top_concern TEXT")
-        if "revenue_generating" not in existing_cols:
-            conn.execute("ALTER TABLE business_context ADD COLUMN revenue_generating INTEGER")
-        if "exposed_systems" not in existing_cols:
-            conn.execute("ALTER TABLE business_context ADD COLUMN exposed_systems TEXT")  # JSON array
-        if "exposed_systems_other" not in existing_cols:
-            conn.execute("ALTER TABLE business_context ADD COLUMN exposed_systems_other TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -202,13 +162,6 @@ def get_business_context(user_id):
         "hasSecurityTeam": None
         if row["has_security_team"] is None
         else bool(row["has_security_team"]),
-        "hadBreach": row["had_breach"],
-        "topConcern": row["top_concern"],
-        "revenueGenerating": None
-        if row["revenue_generating"] is None
-        else bool(row["revenue_generating"]),
-        "exposedSystems": json.loads(row["exposed_systems"]) if row["exposed_systems"] else [],
-        "exposedSystemsOther": row["exposed_systems_other"],
     }
 
 
@@ -252,28 +205,6 @@ def _validate(body):
     if not isinstance(body.get("airGapped"), bool):
         return "Please answer whether you have air-gapped systems"
 
-    if internet_facing in ("public", "mixed"):
-        exposed_systems = body.get("exposedSystems")
-        if (
-            not isinstance(exposed_systems, list)
-            or not exposed_systems
-            or not set(exposed_systems).issubset(EXPOSED_SYSTEM_OPTIONS)
-        ):
-            return "Please select which system(s) are internet-facing"
-        if "other" in exposed_systems and not (body.get("exposedSystemsOther") or "").strip():
-            return "Please describe the other internet-facing system"
-
-    top_concern = body.get("topConcern")
-    if top_concern not in TOP_CONCERN_OPTIONS:
-        return "Please select what would concern you most if this system were compromised"
-
-    had_breach = body.get("hadBreach")
-    if had_breach not in HAD_BREACH_OPTIONS:
-        return "Please answer whether you've had a security incident or breach before"
-
-    if not isinstance(body.get("revenueGenerating"), bool):
-        return "Please answer whether this system directly generates revenue"
-
     has_security_team = body.get("hasSecurityTeam")
     if has_security_team is not None and not isinstance(has_security_team, bool):
         return "hasSecurityTeam must be true, false, or omitted"
@@ -296,15 +227,9 @@ def submit():
     sector_other = (body.get("sectorOther") or "").strip() if sector == "other" else None
     availability_impact = body["availabilityImpact"]
     criticality_tier = AVAILABILITY_TO_TIER[availability_impact]
-    internet_facing = body["internetFacing"]
     air_gapped = body["airGapped"]
     air_gapped_details = (body.get("airGappedDetails") or "").strip() or None
     has_security_team = body.get("hasSecurityTeam")
-    exposed_systems = body.get("exposedSystems") or [] if internet_facing in ("public", "mixed") else []
-    exposed_systems_other = (
-        (body.get("exposedSystemsOther") or "").strip() or None
-        if "other" in exposed_systems else None
-    )
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -316,10 +241,8 @@ def submit():
                 user_id, sector, sector_other, data_sensitivity,
                 availability_impact, criticality_tier, internet_facing,
                 compliance_scope, air_gapped, air_gapped_details,
-                has_security_team, had_breach, top_concern,
-                revenue_generating, exposed_systems, exposed_systems_other,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                has_security_team, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 sector=excluded.sector,
                 sector_other=excluded.sector_other,
@@ -331,11 +254,6 @@ def submit():
                 air_gapped=excluded.air_gapped,
                 air_gapped_details=excluded.air_gapped_details,
                 has_security_team=excluded.has_security_team,
-                had_breach=excluded.had_breach,
-                top_concern=excluded.top_concern,
-                revenue_generating=excluded.revenue_generating,
-                exposed_systems=excluded.exposed_systems,
-                exposed_systems_other=excluded.exposed_systems_other,
                 updated_at=excluded.updated_at
             """,
             (
@@ -345,16 +263,11 @@ def submit():
                 json.dumps(body["dataSensitivity"]),
                 availability_impact,
                 criticality_tier,
-                internet_facing,
+                body["internetFacing"],
                 json.dumps(body["complianceScope"]),
                 1 if air_gapped else 0,
                 air_gapped_details,
                 None if has_security_team is None else (1 if has_security_team else 0),
-                body["hadBreach"],
-                body["topConcern"],
-                1 if body["revenueGenerating"] else 0,
-                json.dumps(exposed_systems),
-                exposed_systems_other,
                 now,
                 now,
             ),
