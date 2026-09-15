@@ -18,4 +18,10 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
   },
+  test: {
+    // "node" is enough for the pure-logic tests (no DOM/render involved),
+    // and avoids pulling jsdom in for tests that don't need it.
+    environment: "node",
+    include: ["src/__tests__/**/*.test.{js,jsx}"],
+  },
 });

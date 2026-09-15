@@ -10,7 +10,7 @@ const API_BASE = "http://localhost:5000";
 // demo data so the wizard still looks right before anything is uploaded.
 // Once a real scan file is uploaded, applyScanResults() overwrites their
 // contents with the parsed findings from the scanner-upload backend.
-let cveDetails = {
+export let cveDetails = {
   "CVE-2024-3094": {
     cvss: 9.8, confidence: 92, severity: "Critical",
     title: "XZ Utils backdoor (liblzma)",
@@ -39,15 +39,15 @@ let cveDetails = {
 };
 
 //placeholder vulnerabilities
-let allRisks = Object.entries(cveDetails).map(([id, d]) => ({ id, cvss: d.cvss, severity: d.severity, title: d.title }));
-let vulnRows = [
+export let allRisks = Object.entries(cveDetails).map(([id, d]) => ({ id, cvss: d.cvss, severity: d.severity, title: d.title }));
+export let vulnRows = [
   { id: "CVE-2024-3094",  title: "",                                  severity: "Critical", cvss: 9.8, asset: "db-analytics-02"  },
   { id: "CVE-2026-33845", title: "OpenSSL heap overflow in X.509 parser", severity: "Critical", cvss: 9.6, asset: "edge-gw-prod-01"  },
   { id: "CVE-2026-44012", title: "Redis Lua sandbox escape",           severity: "Critical", cvss: 9.1, asset: "cache-shard-7"    },
   { id: "CVE-2026-33846", title: "Kubernetes kubelet path traversal",  severity: "High",     cvss: 8.2, asset: "k8s-cluster-eu"  },
   { id: "CVE-2026-12012", title: "nginx HTTP/3 use-after-free",        severity: "Medium",   cvss: 6.3, asset: "edge-gw-prod-02" },
 ];
-let validationRows = [
+export let validationRows = [
   { id: "CVE-2024-3094",  severity: "Critical", status: "Validated",    desc: "OpenSSL heap overflow in X.509 parser"  },
   { id: "CVE-2026-33845", severity: "Critical", status: "Needs Review", desc: "Kubernetes kubelet path traversal"      },
   { id: "CVE-2026-44012", severity: "Critical", status: "Validated",    desc: "Redis Lua sandbox escape"               },
@@ -57,7 +57,7 @@ let validationRows = [
 // Raw normalized findings from the last successful scan, kept around so the
 // chatbot can ground its answers in the same data the rest of the wizard is
 // showing (cve, title, severity, cvss, asset, package — see /api/chat).
-let lastVulnerabilities = [];
+export let lastVulnerabilities = [];
 
 // Which scanner/source/target the current wizard run came from — set once
 // when raw results first land (see UploadStep's onParsed calls below) and
@@ -66,7 +66,7 @@ let lastVulnerabilities = [];
 // POST /api/scans in scans.py). A scan only gets recorded to history at
 // that point, not right after upload/scan, so abandoning the wizard partway
 // through never shows up as a "completed" scan.
-let lastScanMeta = { scanner: null, source: null, target: null };
+export let lastScanMeta = { scanner: null, source: null, target: null };
 
 // Turns the parsed vulnerability list returned by the scanner-upload backend
 // into the same shapes the wizard's UI already renders (vulnRows, cveDetails,
@@ -77,7 +77,7 @@ let lastScanMeta = { scanner: null, source: null, target: null };
 // went through POST /api/analyze first — see runAiAnalysis() below. If
 // those fields aren't present (analysis skipped or failed), fall back to
 // the same heuristic placeholders as before so the UI never breaks.
-function applyScanResults(vulnerabilities, meta) {
+export function applyScanResults(vulnerabilities, meta) {
   const list = Array.isArray(vulnerabilities) ? vulnerabilities : [];
   lastVulnerabilities = list;
   // Only set when actually passed — the second onParsed call per scan (once
@@ -317,6 +317,12 @@ const css = `
   .cve-section { background:#f9fafb; border-radius:12px; padding:16px 20px; margin-bottom:12px; }
   .cve-section-title { font-size:13px; font-weight:600; color:#374151; margin-bottom:8px; }
   .cve-section-text { font-size:13px; color:#6b7280; line-height:1.6; }
+  .cve-tab-bar { display:flex; gap:4px; margin-bottom:12px; border-bottom:1px solid #e5e7eb; }
+  .cve-tab { padding:9px 16px; font-size:13px; font-weight:600; color:#9ca3af; cursor:pointer; background:none; border:none; border-bottom:2px solid transparent; font-family:'DM Sans', sans-serif; margin-bottom:-1px; }
+  .cve-tab:hover { color:#374151; }
+  .cve-tab.active { color:#111; border-bottom-color:#2563eb; }
+  .cve-tab.active.impact-tab { color:#7c3aed; border-bottom-color:#7c3aed; }
+  .read-more-toggle { display:inline-block; margin-top:10px; font-size:12px; font-weight:700; color:#2563eb; cursor:pointer; user-select:none; }
   .cve-fix-list { list-style:none; display:flex; flex-direction:column; gap:6px; }
   .cve-fix-item { font-size:13px; color:#6b7280; display:flex; gap:8px; }
   .cve-fix-num { font-weight:700; color:#374151; flex-shrink:0; }
@@ -1578,11 +1584,55 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
   );
 }
 
+// The raw business_priority_score is CVSS multiplied by an org-wide factor
+// from the business-context survey (see ai_analysis.compute_business_priority_score),
+// so the number alone means nothing without knowing that factor — a 24 is
+// near the top of the range for one org and mid-table for another. Dividing
+// the score by the finding's own CVSS recovers that factor, which gives us
+// the highest score this org could see (a 10.0 CVSS finding) to band against.
+const CRITICALITY_BANDS = [
+  { min: 0.7, label: "High criticality", color: "#dc2626" },
+  { min: 0.4, label: "Medium criticality", color: "#f97316" },
+  { min: 0, label: "Low criticality", color: "#16a34a" },
+];
+
+export function criticalityBand(score, cvss) {
+  const ceiling = cvss > 0 ? (score / cvss) * 10 : 10;
+  const ratio = ceiling > 0 ? score / ceiling : 0;
+  return CRITICALITY_BANDS.find(b => ratio >= b.min) || CRITICALITY_BANDS[CRITICALITY_BANDS.length - 1];
+}
+
+// Splits AI-generated prose into a lead sentence (shown by default) and the
+// remainder (revealed by "Read more"), so the tab starts short instead of
+// dumping a full paragraph on the page at once. Falls back to treating the
+// whole string as the summary if it's a single sentence or has no
+// terminator we recognise.
+export function splitSummary(text) {
+  if (!text) return { summary: "", rest: "" };
+  const match = text.match(/^(.*?[.!?])(\s+|$)/);
+  if (!match || match[1].length === text.trim().length) return { summary: text.trim(), rest: "" };
+  return { summary: match[1].trim(), rest: text.slice(match[0].length).trim() };
+}
+
 //CVE Detail (sub-page of AI Summary/Select)
 function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
   const d = cveDetails[cveId];
   const cvssColor = d.cvss >= 9 ? "#dc2626" : d.cvss >= 7 ? "#f97316" : "#ca8a04";
   const confColor = d.confidence >= 90 ? "#22c55e" : "#f97316";
+
+  const tabs = [
+    { key: "why", label: "Why This Matters", text: d.why },
+    ...(d.businessImpact ? [{ key: "impact", label: "Business Impact", text: d.businessImpact }] : []),
+    { key: "fix", label: "Suggested Fix", fixes: d.fixes },
+  ];
+  const [activeTab, setActiveTab] = useState("why");
+  // Read-more state is per-tab and per-CVE, keyed so switching CVEs (without
+  // remounting, if a caller ever reuses this component) resets to collapsed.
+  const [expanded, setExpanded] = useState({});
+  const toggleExpanded = key => setExpanded(s => ({ ...s, [`${cveId}:${key}`]: !s[`${cveId}:${key}`] }));
+  const isExpanded = key => !!expanded[`${cveId}:${key}`];
+  const tab = tabs.find(t => t.key === activeTab) || tabs[0];
+
   return (
     <>
       <div className="page-card">
@@ -1603,42 +1653,79 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
             <div className="cve-score-val" style={{ color: confColor }}>{d.confidence}%</div>
             <div className="cve-score-sub">Validated against NVD & vendor advisory</div>
           </div>
-          {d.businessPriorityScore != null && (
-            <div className="cve-score-card">
-              <div className="cve-score-label">Business Priority</div>
-              <div className="cve-score-val" style={{ color: "#7c3aed" }}>{d.businessPriorityScore}</div>
-              <div className="cve-score-sub">CVSS weighted by your business profile</div>
-            </div>
-          )}
+          {d.businessPriorityScore != null && (() => {
+            const band = criticalityBand(d.businessPriorityScore, d.cvss);
+            return (
+              <div className="cve-score-card">
+                <div className="cve-score-label">Business Criticality</div>
+                <div
+                  className="cve-score-val"
+                  style={{ color: band.color, fontSize: 20, lineHeight: 1.2 }}
+                  title={`Score ${d.businessPriorityScore}`}
+                >
+                  {band.label}
+                </div>
+                <div className="cve-score-sub">CVSS weighted by your business profile</div>
+              </div>
+            );
+          })()}
         </div>
 
-        <div className="cve-section">
-          <div className="cve-section-title">Why This Matters</div>
-          <div className="cve-section-text">{d.why}</div>
+        <div className="cve-tab-bar">
+          {tabs.map(t => (
+            <button
+              key={t.key}
+              className={`cve-tab ${activeTab === t.key ? "active" : ""} ${t.key === "impact" ? "impact-tab" : ""}`}
+              onClick={() => setActiveTab(t.key)}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
 
-        {d.businessImpact && (
-          <div className="cve-section" style={{ background: "#f5f3ff", borderLeft: "3px solid #7c3aed" }}>
-            <div className="cve-section-title" style={{ color: "#7c3aed" }}>Business Impact</div>
-            <div className="cve-section-text">{d.businessImpact}</div>
-          </div>
-        )}
-
-        <div className="cve-section">
-          <div className="cve-section-title">Suggested Fix</div>
-          <ol className="cve-fix-list">
-            {d.fixes.map((f, i) => (
-              <li key={i} className="cve-fix-item">
-                <span className="cve-fix-num">{i + 1}.</span> {f}
-              </li>
-            ))}
-          </ol>
+        <div className="cve-section" style={tab.key === "impact" ? { background: "#f5f3ff", borderLeft: "3px solid #7c3aed" } : undefined}>
+          {tab.key === "fix" ? (() => {
+            const fixes = tab.fixes || [];
+            const expandedFix = isExpanded("fix");
+            const shown = expandedFix ? fixes : fixes.slice(0, 1);
+            return (
+              <>
+                <ol className="cve-fix-list">
+                  {shown.map((f, i) => (
+                    <li key={i} className="cve-fix-item">
+                      <span className="cve-fix-num">{i + 1}.</span> {f}
+                    </li>
+                  ))}
+                </ol>
+                {fixes.length > 1 && (
+                  <span className="read-more-toggle" onClick={() => toggleExpanded("fix")}>
+                    {expandedFix ? "▲ Show less" : `Read more (${fixes.length - 1} more step${fixes.length - 1 === 1 ? "" : "s"})`}
+                  </span>
+                )}
+              </>
+            );
+          })() : (() => {
+            const { summary, rest } = splitSummary(tab.text);
+            const expandedText = isExpanded(tab.key);
+            return (
+              <>
+                <div className="cve-section-text">{summary}</div>
+                {rest && expandedText && <div className="cve-section-text" style={{ marginTop: 8 }}>{rest}</div>}
+                {rest && (
+                  <span className="read-more-toggle" onClick={() => toggleExpanded(tab.key)}>
+                    {expandedText ? "▲ Show less" : "Read more"}
+                  </span>
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
 
     </>
   );
 }
+
 
 //upload step 3: Select
 // Shared filter bar for pages that list vulnerabilities/tickets. Renders an

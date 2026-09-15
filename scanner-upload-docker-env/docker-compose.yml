@@ -84,9 +84,9 @@ services:
   # manual step is exactly what went wrong before: easy to run once, get a
   # different/default model, and never notice the name doesn't match what
   # OLLAMA_MODEL in backend/.env actually says. This container pulls ONE
-  # hardcoded model (llama3.1, matching OLLAMA_MODEL's default in
-  # backend/.env.example) against the SAME Ollama server the backend talks
-  # to, then exits successfully — `backend` won't start until this finishes.
+  # hardcoded model (llama3.2:3b, matching OLLAMA_MODEL in backend/.env)
+  # against the SAME Ollama server the backend talks to, then exits
+  # successfully — `backend` won't start until this finishes.
   #
   # If you change OLLAMA_MODEL to something else later, update the model
   # name below to match (both places, kept in sync manually and
@@ -95,7 +95,7 @@ services:
     image: ollama/ollama:latest
     environment:
       - OLLAMA_HOST=http://ollama:11434
-    entrypoint: ["/bin/sh", "-c", "ollama pull llama3.1 && echo 'llama3.1 pulled successfully'"]
+    entrypoint: ["/bin/sh", "-c", "ollama pull llama3.2:3b && echo 'llama3.2:3b pulled successfully'"]
     depends_on:
       ollama:
         condition: service_healthy
