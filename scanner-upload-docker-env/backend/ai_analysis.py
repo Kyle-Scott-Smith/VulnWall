@@ -98,6 +98,27 @@ _TIER_MULTIPLIER = {1: 1.5, 2: 1.25, 3: 1.0, 4: 0.85, 5: 0.7}
 
 _SENSITIVE_DATA_TYPES = {"credentials", "financial", "medical", "pii", "intellectual_property"}
 
+# exposedSystems follow-up (only collected when internetFacing is public/
+# mixed — see business_context.py's EXPOSED_SYSTEM_OPTIONS): an admin panel
+# or remote-access route being reachable is a materially bigger deal than a
+# bare marketing website, even though both count as "public".
+_EXPOSED_SYSTEM_WEIGHTS = {
+    "admin_panel": 1.0,
+    "remote_access": 1.0,
+    "api": 0.75,
+    "website": 0.4,
+    "other": 0.5,
+}
+
+# topConcern ("what would concern you most if this were compromised?") is
+# the anchor question — rather than adding its own separate bonus, it
+# amplifies whichever existing bonus term already matches what the org
+# said they'd care about most.
+_CONCERN_DOUBLES_COMPLIANCE = "legal_regulatory"
+_CONCERN_DOUBLES_SENSITIVITY = "customer_trust"
+_CONCERN_DOUBLES_REVENUE = "revenue_loss"
+_CONCERN_DOUBLES_TIER = {"physical_safety", "operational_downtime"}
+
 
 def _business_context_signature(business_context: dict | None):
     """Compact, hashable summary of the fields that actually affect analysis
@@ -112,6 +133,10 @@ def _business_context_signature(business_context: dict | None):
         business_context.get("airGapped"),
         tuple(sorted(business_context.get("dataSensitivity") or [])),
         tuple(sorted(business_context.get("complianceScope") or [])),
+        tuple(sorted(business_context.get("exposedSystems") or [])),
+        business_context.get("topConcern"),
+        business_context.get("hadBreach"),
+        business_context.get("revenueGenerating"),
     )
 
 
@@ -129,8 +154,30 @@ def _business_context_prompt_block(business_context: dict) -> str:
         f"- Data handled: {sensitivity}",
         f"- Compliance scope: {compliance}",
         f"- Internet-facing: {business_context.get('internetFacing')}",
-        f"- Air-gapped systems present: {'yes' if business_context.get('airGapped') else 'no'}",
     ]
+    exposed_systems = business_context.get("exposedSystems") or []
+    if exposed_systems:
+        systems_label = ", ".join(
+            business_context.get("exposedSystemsOther") if s == "other" and business_context.get("exposedSystemsOther") else s
+            for s in exposed_systems
+        )
+        lines.append(f"- Specific internet-facing systems: {systems_label}")
+    lines.append(f"- Air-gapped systems present: {'yes' if business_context.get('airGapped') else 'no'}")
+    if business_context.get("revenueGenerating") is not None:
+        lines.append(f"- This system directly generates revenue: {'yes' if business_context.get('revenueGenerating') else 'no'}")
+    had_breach = business_context.get("hadBreach")
+    if had_breach and had_breach != "not_sure":
+        lines.append(f"- Prior security incident/breach at this organisation: {'yes' if had_breach == 'yes' else 'no'}")
+    top_concern = business_context.get("topConcern")
+    if top_concern:
+        concern_label = {
+            "revenue_loss": "lost revenue",
+            "customer_trust": "loss of customer trust",
+            "legal_regulatory": "legal/regulatory consequences",
+            "physical_safety": "physical/life-safety impact",
+            "operational_downtime": "operational downtime",
+        }.get(top_concern, top_concern)
+        lines.append(f"- What this org says would concern them most if compromised: {concern_label}")
     return "\n".join(lines)
 
 
@@ -151,23 +198,58 @@ def compute_business_priority_score(vuln: dict, business_context: dict | None) -
     if not business_context:
         return round(base, 2)
 
-    score = base * _TIER_MULTIPLIER.get(business_context.get("criticalityTier"), 1.0)
+    top_concern = business_context.get("topConcern")
+    tier_multiplier = _TIER_MULTIPLIER.get(business_context.get("criticalityTier"), 1.0)
+    score = base * tier_multiplier
+
+    # topConcern == physical_safety/operational_downtime means this org
+    # specifically told us disruption/safety is what they'd worry about
+    # most — lean further into however far the tier multiplier already
+    # pushed the score away from 1.0, rather than adding a flat bonus.
+    if top_concern in _CONCERN_DOUBLES_TIER:
+        score += base * (tier_multiplier - 1.0) * 0.5
 
     internet_facing = business_context.get("internetFacing")
     exposure_bonus = {"public": 1.5, "mixed": 0.75, "internal": 0.0}.get(internet_facing, 0.0)
 
+    # Per-system exposure weighting: an admin panel or remote-access route
+    # being reachable is a bigger deal than a bare marketing website, even
+    # though both count as "public" — see business_context.py's
+    # EXPOSED_SYSTEM_OPTIONS (only collected for public/mixed).
+    if internet_facing in ("public", "mixed"):
+        exposed_systems = business_context.get("exposedSystems") or []
+        if exposed_systems:
+            exposure_bonus += max(_EXPOSED_SYSTEM_WEIGHTS.get(s, 0.5) for s in exposed_systems)
+
     data_sensitivity = set(business_context.get("dataSensitivity") or [])
-    if data_sensitivity & _SENSITIVE_DATA_TYPES:
-        exposure_bonus += 1.0
+    sensitivity_bonus = 1.0 if data_sensitivity & _SENSITIVE_DATA_TYPES else 0.0
+    if top_concern == _CONCERN_DOUBLES_SENSITIVITY:
+        sensitivity_bonus *= 2
+    exposure_bonus += sensitivity_bonus
 
     compliance_scope = business_context.get("complianceScope") or []
-    if any(c != "none" for c in compliance_scope):
-        exposure_bonus += 0.75
+    compliance_bonus = 0.75 if any(c != "none" for c in compliance_scope) else 0.0
+    if top_concern == _CONCERN_DOUBLES_COMPLIANCE:
+        compliance_bonus *= 2
+    exposure_bonus += compliance_bonus
+
+    if business_context.get("revenueGenerating"):
+        revenue_bonus = 0.5
+        if top_concern == _CONCERN_DOUBLES_REVENUE:
+            revenue_bonus *= 2
+        exposure_bonus += revenue_bonus
+
+    # Concrete evidence something has already gone wrong here before is a
+    # stronger urgency signal than any of the hypothetical exposure
+    # factors above.
+    if business_context.get("hadBreach") == "yes":
+        exposure_bonus += 0.5
 
     # Air-gapped orgs have already told us these systems aren't reachable
-    # from outside, so temper the internet/compliance exposure bump rather
-    # than drop it entirely (compliance scope can still apply on an
-    # air-gapped network).
+    # from outside, so temper the WHOLE exposure bundle (internet/
+    # compliance/sensitivity/revenue/breach) rather than drop it entirely
+    # (compliance scope, sensitive data, and breach history can still
+    # apply on an air-gapped network).
     if business_context.get("airGapped"):
         exposure_bonus *= 0.5
 
@@ -197,6 +279,10 @@ def _template_business_impact(business_context: dict | None, severity: str) -> s
     compliance = [c for c in (business_context.get("complianceScope") or []) if c != "none"]
     if compliance:
         parts.append(f"scope under {', '.join(c.upper().replace('_', '-') for c in compliance)}")
+    if business_context.get("revenueGenerating"):
+        parts.append("a revenue-generating system")
+    if business_context.get("hadBreach") == "yes":
+        parts.append("an organisation with a prior security incident")
     if not parts:
         return ""
     tier = business_context.get("criticalityTier")
