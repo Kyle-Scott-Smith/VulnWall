@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import Tutorial, { hasCompletedTutorial } from "./Tutorial";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 
 // Base URL for the scanner-upload backend (Flask). Update this if the
@@ -482,13 +483,13 @@ function Nav({ activeTab, setActiveTab, role }) {
     <nav className="nav">
       <div className="nav-links">
         {navTabsForRole(role).map(tab => (
-          <button key={tab} className={`nav-btn ${activeTab === tab ? "active" : ""}`} onClick={() => setActiveTab(tab)}>
+          <button key={tab} data-tutorial={`nav-${tab}`} className={`nav-btn ${activeTab === tab ? "active" : ""}`} onClick={() => setActiveTab(tab)}>
             <span>✦</span>
             {NAV_TAB_LABELS[tab]}
           </button>
         ))}
       </div>
-      <div className="avatar" onClick={() => setActiveTab("profile")} style={{ cursor: "pointer", background: activeTab === "profile" ? "#2563eb" : "#d1d5db" }}>
+      <div data-tutorial="nav-profile" className="avatar" onClick={() => setActiveTab("profile")} style={{ cursor: "pointer", background: activeTab === "profile" ? "#2563eb" : "#d1d5db" }}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={activeTab === "profile" ? "#fff" : "#6b7280"} strokeWidth="2">
           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
         </svg>
@@ -1406,15 +1407,16 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
     <>
       <div className="page-card">
         <div className="page-title">Upload Scan</div>
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <div data-tutorial="live-scan-toggle" style={{ display: "flex", gap: 8, marginBottom: 16 }}>
           <button style={tabStyle(mode === "upload")} onClick={() => switchMode("upload")}>Upload a report</button>
-          <button style={tabStyle(mode === "live")} onClick={() => switchMode("live")}>Run a live scan</button>
+          <button data-tutorial="live-scan-button" style={tabStyle(mode === "live")} onClick={() => switchMode("live")}>Run a live scan</button>
         </div>
 
         {mode === "upload" ? (
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
             {!file ? (
               <div
+                data-tutorial="upload-dropzone"
                 className={`dropzone ${over ? "over" : ""}`}
                 onDragOver={e => { e.preventDefault(); setOver(true); }}
                 onDragLeave={() => setOver(false)}
@@ -1480,7 +1482,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
             {scanners && Object.keys(scanners).length === 0 && (
               <div style={{ fontSize: 12, color: "#dc2626" }}>Couldn't reach the backend to list scanners. Is it running?</div>
             )}
-            <div>
+            <div data-tutorial="scanner-select">
               <label style={labelStyle}>Scanner</label>
               <select style={inputStyle} value={scannerName} onChange={e => setScannerName(e.target.value)} disabled={liveStatus === "scanning"}>
                 {(scanners ? Object.keys(scanners) : ["trivy", "tenable"]).map(name => (
@@ -1491,7 +1493,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
               </select>
             </div>
 
-            <div>
+            <div data-tutorial="scan-target-field">
               <label style={labelStyle}>
                 {scannerName === "tenable" ? "Tenable scan ID" : "Image, path, or repo to scan"}
               </label>
@@ -1531,7 +1533,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
             )}
 
             {scannerName === "trivy" && trivyScanType === "image" && registryStatus.connected && (
-              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#374151" }}>
+              <label data-tutorial="private-registry-note" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#374151" }}>
                 <input
                   type="checkbox"
                   checked={usePrivateRegistry}
@@ -1542,7 +1544,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
               </label>
             )}
             {scannerName === "trivy" && trivyScanType === "image" && !registryStatus.connected && (
-              <div style={{ fontSize: 12, color: "#9ca3af" }}>
+              <div data-tutorial="private-registry-note" style={{ fontSize: 12, color: "#9ca3af" }}>
                 No private registry connected — go to Profile to connect one if you need to scan a private image.
               </div>
             )}
@@ -3272,12 +3274,21 @@ function UsersManage({ currentUserEmail }) {
   );
 }
 
-function Profile({ onSignOut, userName, userEmail, role, notifications, setNotifications, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign }) {
+function Profile({ onSignOut, userName, userEmail, role, notifications, setNotifications, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign, onRestartTutorial }) {
 
   return (
     <div className="page-card" style={{ maxWidth: 560, margin: "0 auto", width: "100%" }}>
       <div style={{ fontSize: 18, fontWeight: 700, color: "#111", marginBottom: 4 }}>Profile</div>
       <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 24 }}>Manage your account settings</div>
+
+      {onRestartTutorial && (
+        <button
+          onClick={onRestartTutorial}
+          style={{ marginBottom: 20, padding: "8px 14px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", color: "#2563eb", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+        >
+          Restart tutorial
+        </button>
+      )}
 
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 28, padding: 20, background: "#f9fafb", borderRadius: 12 }}>
         <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#2563eb", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 20, fontWeight: 700, flexShrink: 0 }}>
@@ -3849,6 +3860,16 @@ export default function App() {
   // set this, so returning users go straight to the dashboard.
   const [showBusinessContext, setShowBusinessContext] = useState(false);
 
+  // Guided onboarding walkthrough (see Tutorial.jsx). Auto-starts once for
+  // first-time users, tracked in localStorage (per-browser, not yet tied
+  // to the account server-side — see Tutorial.jsx's top comment for why).
+  const [tutorialActive, setTutorialActive] = useState(false);
+  useEffect(() => {
+    if (authed && !showBusinessContext && !hasCompletedTutorial()) {
+      setTutorialActive(true);
+    }
+  }, [authed, showBusinessContext]);
+
   // On load, ask the backend whether this browser already has a signed-in
   // session (session cookie from a previous visit) so a page refresh doesn't
   // bounce a signed-in user back to the sign-in screen.
@@ -4082,6 +4103,12 @@ export default function App() {
       <div className="shell">
         <Nav activeTab={activeTab} setActiveTab={goToTab} role={role} />
 
+        <Tutorial
+          active={tutorialActive}
+          onFinish={() => setTutorialActive(false)}
+          onNavigate={tab => setActiveTab(tab)}
+        />
+
         {/* Viewer never sees the Upload Scan tab (see navTabsForRole), but
             guard the content too in case a role change lands mid-session
             while this tab is already open — the backend blocks the
@@ -4118,6 +4145,7 @@ export default function App() {
             setMfaEnabled={updateMfa}
             defaultAssign={defaultAssign}
             setDefaultAssign={setDefaultAssign}
+            onRestartTutorial={() => setTutorialActive(true)}
           />
         )}
 
