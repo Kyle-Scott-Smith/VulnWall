@@ -2638,6 +2638,17 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
                       source: lastScanMeta.source,
                       target: lastScanMeta.target,
                       vulnerabilities: lastVulnerabilities,
+                      // Only tickets that were actually created in Jira —
+                      // drives the "every scan sent to Jira" email option.
+                      jiraTickets: tickets
+                        .filter(t => jiraResults[t.id])
+                        .map(t => ({
+                          cve: t.id,
+                          title: t.title,
+                          priority: t.priority,
+                          issueKey: jiraResults[t.id].issueKey,
+                          url: jiraResults[t.id].url,
+                        })),
                     }),
                   });
                 } catch {
@@ -3284,7 +3295,14 @@ function UsersManage({ currentUserEmail }) {
   );
 }
 
-function Profile({ onSignOut, userName, userEmail, role, notifications, setNotifications, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign, onRestartTutorial }) {
+const NOTIFY_LEVEL_OPTIONS = [
+  { value: "critical", label: "Critical only", hint: "The most urgent findings" },
+  { value: "high", label: "High and above", hint: "High and Critical" },
+  { value: "medium", label: "Medium and above", hint: "Medium, High and Critical" },
+  { value: "all", label: "Every scan sent to Jira", hint: "A summary email whenever tickets from a scan are pushed to Jira" },
+];
+
+function Profile({ onSignOut, userName, userEmail, role, notifications, setNotifications, notifyLevel, notifyOnJira, setNotifyChoice, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign, onRestartTutorial }) {
 
   return (
     <div className="page-card" style={{ maxWidth: 560, margin: "0 auto", width: "100%" }}>
@@ -3337,16 +3355,42 @@ function Profile({ onSignOut, userName, userEmail, role, notifications, setNotif
 
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Preferences</div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", marginBottom: 10 }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Email notifications</div>
-            <div style={{ fontSize: 12, color: "#6b7280" }}>Get alerted for critical vulnerabilities</div>
+        <div style={{ background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px" }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Email notifications</div>
+              <div style={{ fontSize: 12, color: "#6b7280" }}>Choose which scan results you get emailed about</div>
+            </div>
+            <div
+              onClick={() => setNotifications(!notifications)}
+              style={{ width: 44, height: 24, borderRadius: 99, background: notifications ? "#2563eb" : "#e5e7eb", cursor: "pointer", position: "relative", transition: "background .2s", flexShrink: 0 }}>
+              <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: notifications ? 23 : 3, transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
+            </div>
           </div>
-          <div
-            onClick={() => setNotifications(!notifications)}
-            style={{ width: 44, height: 24, borderRadius: 99, background: notifications ? "#2563eb" : "#e5e7eb", cursor: "pointer", position: "relative", transition: "background .2s", flexShrink: 0 }}>
-            <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: notifications ? 23 : 3, transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
-          </div>
+
+          {notifications && (
+            <div style={{ padding: "12px 16px 14px", borderTop: "1px solid #e5e7eb" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Email me about…</div>
+              {NOTIFY_LEVEL_OPTIONS.map(opt => (
+                <label key={opt.value} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "5px 0", cursor: "pointer" }}>
+                  <input
+                    type="radio"
+                    name="notify-level"
+                    checked={(notifyOnJira ? "all" : notifyLevel) === opt.value}
+                    onChange={() => setNotifyChoice(opt.value)}
+                    style={{ marginTop: 3, accentColor: "#2563eb" }}
+                  />
+                  <span>
+                    <span style={{ display: "block", fontSize: 13, color: "#374151" }}>{opt.label}</span>
+                    <span style={{ display: "block", fontSize: 12, color: "#6b7280" }}>{opt.hint}</span>
+                  </span>
+                </label>
+              ))}
+              <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 6 }}>
+                Severity options only email about findings that weren't in your previous scan.
+              </div>
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", marginBottom: 10 }}>
           <div>
@@ -3857,6 +3901,19 @@ export default function App() {
   // first of those responses arrives; every real gate lives server-side.
   const [role, setRole] = useState("analyst");
   const [notifications, setNotifications] = useState(DEFAULT_PROFILE_PREFS.notifications);
+  // Fine-grained email controls, only relevant while `notifications` (the
+  // master switch, off by default) is on — see auth.py's notify_level /
+  // notify_on_jira columns. Defaults mirror the backend's so a user who had
+  // notifications on before these existed keeps Critical-only emails.
+  const [notifyLevel, setNotifyLevel] = useState("critical");
+  const [notifyOnJira, setNotifyOnJira] = useState(false);
+  // Every place a user object comes back from the server (session restore,
+  // sign-in, sign-up, MFA verify) applies all three email settings at once.
+  const applyNotificationPrefs = data => {
+    setNotifications(!!data.notifyOnCritical);
+    setNotifyLevel(data.notifyLevel || "critical");
+    setNotifyOnJira(!!data.notifyOnJira);
+  };
   const [defaultAssign, setDefaultAssign] = useState(DEFAULT_PROFILE_PREFS.defaultAssign);
   // Two-factor authentication (email-OTP) — Profile page toggle, backed by
   // users.mfa_enabled (see auth.py). mfaEmail is just a display hint for
@@ -3930,7 +3987,7 @@ export default function App() {
           // sending an alert email, mfaEnabled is what login() checks
           // before requiring a code) — only defaultAssign, which has no
           // server-side effect, comes from localStorage.
-          setNotifications(!!data.notifyOnCritical);
+          applyNotificationPrefs(data);
           setMfaEnabled(!!data.mfaEnabled);
           setRole(data.role || "analyst");
           setDefaultAssign(prefs.defaultAssign);
@@ -3951,14 +4008,28 @@ export default function App() {
   // PATCH /api/auth/notifications in auth.py) — scanner.py reads this
   // column directly when deciding whether to send a critical-finding
   // alert, so it has to live on the backend, not just in this browser tab.
-  const updateNotifications = (enabled) => {
-    setNotifications(enabled);
+  const saveNotificationSettings = (patch) => {
     fetch(`${API_BASE}/api/auth/notifications`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify(patch),
     }).catch(() => {});
+  };
+  const updateNotifications = (enabled) => {
+    setNotifications(enabled);
+    saveNotificationSettings({ enabled });
+  };
+  // The Profile radio list: "critical" | "high" (High and above) | "medium"
+  // (Medium and above) email about NEW findings at that level; "all" emails
+  // for every scan sent to Jira instead. They're mutually exclusive, so both
+  // backend fields are set together in a single PATCH.
+  const updateNotifyChoice = (choice) => {
+    const jira = choice === "all";
+    const level = jira ? "none" : choice;
+    setNotifyLevel(level);
+    setNotifyOnJira(jira);
+    saveNotificationSettings({ level, jira });
   };
 
   // Flips the Two-factor authentication toggle and persists it server-side
@@ -4040,7 +4111,7 @@ export default function App() {
                   setUserEmail(data.email);
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
-                  setNotifications(!!data.notifyOnCritical);
+                  applyNotificationPrefs(data);
                   setMfaEnabled(!!data.mfaEnabled);
                   setRole(data.role || "analyst");
                   setDefaultAssign(prefs.defaultAssign);
@@ -4059,7 +4130,7 @@ export default function App() {
                   setUserEmail(data.email);
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
-                  setNotifications(!!data.notifyOnCritical);
+                  applyNotificationPrefs(data);
                   setMfaEnabled(!!data.mfaEnabled);
                   setRole(data.role || "analyst");
                   setDefaultAssign(prefs.defaultAssign);
@@ -4074,7 +4145,7 @@ export default function App() {
                   setUserEmail(data.email);
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
-                  setNotifications(!!data.notifyOnCritical);
+                  applyNotificationPrefs(data);
                   setMfaEnabled(!!data.mfaEnabled);
                   setRole(data.role || "analyst");
                   setDefaultAssign(prefs.defaultAssign);
@@ -4151,6 +4222,9 @@ export default function App() {
             role={role}
             notifications={notifications}
             setNotifications={updateNotifications}
+            notifyLevel={notifyLevel}
+            setNotifyChoice={updateNotifyChoice}
+            notifyOnJira={notifyOnJira}
             mfaEnabled={mfaEnabled}
             setMfaEnabled={updateMfa}
             defaultAssign={defaultAssign}

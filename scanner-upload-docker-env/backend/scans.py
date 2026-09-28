@@ -38,6 +38,7 @@ from flask import Blueprint, jsonify, request, session
 
 import email_notifications
 from auth import _get_db, get_user_by_id, require_role
+from email_notifications import SEVERITY_RANK
 
 scans_bp = Blueprint("scans", __name__, url_prefix="/api/scans")
 
@@ -75,7 +76,7 @@ def init_scans_db():
         conn.close()
 
 
-def record_scan(user_id, scanner_name, source, target, vulnerabilities):
+def record_scan(user_id, scanner_name, source, target, vulnerabilities, min_severity="critical"):
     """Inserts one scan-history row for user_id, computed from the finalized
     vulnerability list (post-dedupe/cross-reference, same list the frontend
     receives). Call this once per completed upload or live scan; a no-op if
@@ -87,13 +88,19 @@ def record_scan(user_id, scanner_name, source, target, vulnerabilities):
     if needed.
     target: filename (upload) or scan target (live), for context only.
 
-    Returns the list of full vulnerability dicts that are BOTH Critical
-    severity AND weren't present in this user's immediately previous scan
-    — this is what scanner.py checks to decide whether a "new critical
-    findings" email alert is warranted (see email_notifications.py). On a
-    user's very first scan, everything Critical counts as new (there's
-    nothing to diff against, same convention dashboard.py uses for "new
-    since last scan"). Returns an empty list if nobody's signed in.
+    min_severity: "critical" | "high" | "medium" — the lowest severity that
+    counts for the return value below (the user's email-notification level,
+    see auth.py's notify_level). Defaults to "critical", which is the
+    original behaviour.
+
+    Returns the list of full vulnerability dicts that are BOTH at or above
+    min_severity AND weren't present in this user's immediately previous
+    scan — this is what _maybe_send_scan_notification uses to decide
+    whether a "new findings" email is warranted (see
+    email_notifications.py). On a user's very first scan, everything at or
+    above the threshold counts as new (there's nothing to diff against,
+    same convention dashboard.py uses for "new since last scan"). Returns
+    an empty list if nobody's signed in.
     """
     if not user_id:
         return []
@@ -132,49 +139,64 @@ def record_scan(user_id, scanner_name, source, target, vulnerabilities):
     finally:
         conn.close()
 
+    threshold = SEVERITY_RANK.get(min_severity, SEVERITY_RANK["critical"])
     return [
         v for v in (vulnerabilities or [])
-        if str(v.get("severity") or "").strip().lower() == "critical"
+        if SEVERITY_RANK.get(str(v.get("severity") or "").strip().lower(), 0) >= threshold
         and v.get("cve")
         and v.get("cve") not in previous_cves
     ]
 
 
-def _maybe_send_critical_alert(user_id, scanner_name, target, new_critical_vulns):
-    """Fires off the "new Critical findings" email (see
-    email_notifications.py) if — and only if — someone's signed in, this
-    scan actually turned up new Criticals (record_scan already did the
-    "new since last scan" diffing), and that user has the Profile page's
-    Email notifications toggle on (off by default — see auth.py's
-    notify_on_critical column). Never lets an email problem (SMTP not
-    configured, provider rejects the send, network hiccup) fail the request
-    that triggered it — the scan/ticket flow already succeeded by the time
-    this runs. Moved here (from scanner.py) alongside record_scan() now
-    that both fire together from POST /api/scans, once the wizard is
-    actually complete rather than right after parsing."""
-    if not user_id or not new_critical_vulns:
-        return
-
-    user = get_user_by_id(user_id)
+def _notification_prefs(user):
+    """Reads a user row's email settings (see auth.py) into
+    (min_severity, wants_jira):
+      - min_severity: "critical" | "high" | "medium", or None if they don't
+        want severity-based emails
+      - wants_jira: True if they want an email when a scan's tickets were
+        sent to Jira
+    Both are off/None if the master Email notifications toggle is off (its
+    default), or if there's no user."""
     if not user or not user["notify_on_critical"]:
+        return None, False
+    level = user["notify_level"]
+    return (level if level in ("critical", "high", "medium") else None), bool(user["notify_on_jira"])
+
+
+def _maybe_send_scan_notification(user, scanner_name, target, new_findings, jira_tickets):
+    """Sends the scan email (see email_notifications.py) if — and only if —
+    the master Email notifications toggle is on (off by default) and this
+    scan actually matches something the user opted into: new findings at
+    their chosen severity level (record_scan already did the "new since
+    last scan" diffing), and/or tickets sent to Jira with "Every scan sent
+    to Jira" ticked. Both kinds go out as a single combined email. Never
+    lets an email problem (SMTP not configured, provider rejects the send,
+    network hiccup) fail the request that triggered it — the scan/ticket
+    flow already succeeded by the time this runs."""
+    min_severity, wants_jira = _notification_prefs(user)
+    findings = new_findings if min_severity else []
+    tickets = jira_tickets if wants_jira else []
+    if not findings and not tickets:
         return
 
     try:
-        email_notifications.send_critical_alert(
-            user["email"], user["name"], new_critical_vulns,
+        email_notifications.send_scan_notification(
+            user["email"], user["name"], findings,
             scan_context={"scanner": scanner_name, "target": target},
+            jira_tickets=tickets,
+            min_severity=min_severity or "critical",
         )
     except EnvironmentError:
-        logger.info("Email alerts not configured - skipping critical-finding email")
+        logger.info("Email alerts not configured - skipping scan notification email")
     except Exception:
-        logger.exception("Failed to send critical-finding email alert")
+        logger.exception("Failed to send scan notification email")
 
 
 @scans_bp.route("", methods=["POST"])
 @require_role("admin", "analyst")
 def complete_scan():
-    """Records a scan as completed — and, if warranted, fires the critical-
-    finding email alert (see _maybe_send_critical_alert above).
+    """Records a scan as completed — and, if warranted, fires the scan
+    notification email (see _maybe_send_scan_notification above).
 
     Deliberately NOT called right after a scan is uploaded/run (compare:
     it used to be called from scanner.py's /api/upload-scan and /api/scan).
@@ -185,10 +207,13 @@ def complete_scan():
     the tab, never reviews the findings, never sends anything — should NOT
     show up in scan history or the dashboard as a completed scan.
 
-    Body: {scanner, source, target, vulnerabilities} — the same finalized
-    vulnerability list (post-dedupe/Tenable-cross-reference/AI-analysis)
-    the frontend has been holding onto since upload/scan, same shape
-    /api/upload-scan, /api/scan, and /api/analyze already return.
+    Body: {scanner, source, target, vulnerabilities, jiraTickets} — the
+    same finalized vulnerability list (post-dedupe/Tenable-cross-reference/
+    AI-analysis) the frontend has been holding onto since upload/scan, same
+    shape /api/upload-scan, /api/scan, and /api/analyze already return.
+    jiraTickets is optional: [{issueKey, url, title, priority, cve}] for
+    each ticket that was actually created in Jira during this send (empty
+    or absent if Jira isn't connected / nothing was pushed).
     Gated to Admin/Analyst (see auth.require_role) — a Viewer can't reach
     this because the whole upload/scan wizard that leads here is already
     blocked for them at /api/upload-scan and /api/scan.
@@ -198,13 +223,27 @@ def complete_scan():
     if not isinstance(vulnerabilities, list):
         return jsonify({"error": "Expected a 'vulnerabilities' array"}), 400
 
+    raw_tickets = body.get("jiraTickets")
+    jira_tickets = [
+        t for t in (raw_tickets if isinstance(raw_tickets, list) else [])
+        if isinstance(t, dict) and t.get("issueKey")
+    ]
+
     user_id = session.get("user_id")
     scanner_name = body.get("scanner")
     source = body.get("source")
     target = body.get("target")
 
-    new_critical = record_scan(user_id, scanner_name, source, target, vulnerabilities)
-    _maybe_send_critical_alert(user_id, scanner_name, target, new_critical)
+    # Look the user up first: their chosen severity level decides which new
+    # findings record_scan hands back.
+    user = get_user_by_id(user_id)
+    min_severity, _wants_jira = _notification_prefs(user)
+
+    new_findings = record_scan(
+        user_id, scanner_name, source, target, vulnerabilities,
+        min_severity=min_severity or "critical",
+    )
+    _maybe_send_scan_notification(user, scanner_name, target, new_findings, jira_tickets)
 
     return jsonify({"status": "recorded"})
 

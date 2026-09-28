@@ -140,6 +140,18 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
         if "notify_on_critical" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN notify_on_critical INTEGER NOT NULL DEFAULT 0")
+        # Fine-grained email controls (see update_notifications below).
+        # notify_on_critical stays the master on/off switch (off by default,
+        # unchanged); these two only matter once it's on. notify_level is the
+        # lowest severity of NEW finding worth an email ('none' | 'critical' |
+        # 'high' | 'medium' -- 'high' means High and above, etc). Defaulting to
+        # 'critical' means anyone who already had the toggle on keeps getting
+        # exactly the emails they got before. notify_on_jira additionally
+        # emails when a scan's tickets were sent to Jira.
+        if "notify_level" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN notify_level TEXT NOT NULL DEFAULT 'critical'")
+        if "notify_on_jira" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN notify_on_jira INTEGER NOT NULL DEFAULT 0")
         if "mfa_enabled" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
         if "mfa_code_hash" not in existing_cols:
@@ -177,12 +189,18 @@ def _password_error(password):
     return None
 
 
+# Valid values for users.notify_level -- see update_notifications().
+NOTIFY_LEVELS = ("none", "critical", "high", "medium")
+
+
 def _user_to_json(row):
     return {
         "name": row["name"],
         "email": row["email"],
         "authProvider": row["auth_provider"],
         "notifyOnCritical": bool(row["notify_on_critical"]),
+        "notifyLevel": row["notify_level"] or "critical",
+        "notifyOnJira": bool(row["notify_on_jira"]),
         "mfaEnabled": bool(row["mfa_enabled"]),
         "role": row["role"],
     }
@@ -417,27 +435,59 @@ def me():
 
 @auth_bp.route("/notifications", methods=["PATCH"])
 def update_notifications():
-    """Body: {"enabled": bool} — backs the Profile page's "Email
-    notifications" toggle. Persisted server-side (rather than just in the
-    browser) because scanner.py needs to check this on the server, at scan
-    time, to decide whether a critical-finding alert email should go out."""
+    """Backs the Profile page's "Email notifications" section. Persisted
+    server-side (rather than just in the browser) because scans.py needs to
+    check these on the server, at scan-completion time, to decide what (if
+    anything) to email.
+
+    Body -- any combination of, at least one required:
+      {"enabled": bool}  master switch; off by default. When false, no
+                         emails are sent regardless of the two below.
+      {"level": str}     lowest severity of *new* finding to email about:
+                         "none" | "critical" | "high" (High and above) |
+                         "medium" (Medium and above).
+      {"jira": bool}     also email when a scan's tickets were sent to Jira.
+
+    Partial updates are fine (the toggle sends only "enabled", the radio
+    only "level", etc). Returns the full current state of all three."""
     user_id = session.get("user_id")
     if not user_id:
         return jsonify({"error": "You must be signed in"}), 401
 
     body = request.get_json(silent=True) or {}
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        return jsonify({"error": "'enabled' must be true or false"}), 400
+    updates = {}
 
+    if "enabled" in body:
+        if not isinstance(body["enabled"], bool):
+            return jsonify({"error": "'enabled' must be true or false"}), 400
+        updates["notify_on_critical"] = 1 if body["enabled"] else 0
+    if "level" in body:
+        if body["level"] not in NOTIFY_LEVELS:
+            return jsonify({"error": f"'level' must be one of: {', '.join(NOTIFY_LEVELS)}"}), 400
+        updates["notify_level"] = body["level"]
+    if "jira" in body:
+        if not isinstance(body["jira"], bool):
+            return jsonify({"error": "'jira' must be true or false"}), 400
+        updates["notify_on_jira"] = 1 if body["jira"] else 0
+
+    if not updates:
+        return jsonify({"error": "Nothing to update"}), 400
+
+    # Column names come from the fixed dict above, never from user input.
+    assignments = ", ".join(f"{col} = ?" for col in updates)
     conn = _get_db()
     try:
-        conn.execute("UPDATE users SET notify_on_critical = ? WHERE id = ?", (1 if enabled else 0, user_id))
+        conn.execute(f"UPDATE users SET {assignments} WHERE id = ?", (*updates.values(), user_id))
         conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     finally:
         conn.close()
 
-    return jsonify({"notifyOnCritical": enabled})
+    return jsonify({
+        "notifyOnCritical": bool(row["notify_on_critical"]),
+        "notifyLevel": row["notify_level"],
+        "notifyOnJira": bool(row["notify_on_jira"]),
+    })
 
 
 @auth_bp.route("/mfa", methods=["PATCH"])
