@@ -3302,7 +3302,42 @@ const NOTIFY_LEVEL_OPTIONS = [
   { value: "all", label: "Every scan sent to Jira", hint: "A summary email whenever tickets from a scan are pushed to Jira" },
 ];
 
-function Profile({ onSignOut, userName, userEmail, role, notifications, setNotifications, notifyLevel, notifyOnJira, setNotifyChoice, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign, onRestartTutorial }) {
+function Profile({ onSignOut, userName, userEmail, role, organisation, authProvider, onSaveAccount, notifications, setNotifications, notifyLevel, notifyOnJira, setNotifyChoice, mfaEnabled, setMfaEnabled, defaultAssign, setDefaultAssign, onRestartTutorial }) {
+  // Account details edit mode. `draft` holds the in-progress values so
+  // Cancel can throw them away without touching the saved ones.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({ name: "", email: "", organisation: "", role: "analyst" });
+  const [saving, setSaving] = useState(false);
+  const [accountError, setAccountError] = useState("");
+
+  const startEditing = () => {
+    setDraft({ name: userName || "", email: userEmail || "", organisation: organisation || "", role });
+    setAccountError("");
+    setEditing(true);
+  };
+  const cancelEditing = () => { setEditing(false); setAccountError(""); };
+  const saveEditing = async () => {
+    const name = draft.name.trim();
+    if (!name) { setAccountError("Name can't be empty"); return; }
+    const patch = {};
+    if (name !== (userName || "")) patch.name = name;
+    if (draft.email.trim().toLowerCase() !== (userEmail || "").toLowerCase()) patch.email = draft.email.trim();
+    if (role === "admin" && draft.organisation.trim() !== (organisation || "")) patch.organisation = draft.organisation.trim();
+    if (role === "admin" && draft.role !== role) patch.role = draft.role;
+    if (Object.keys(patch).length === 0) { setEditing(false); return; }
+    setSaving(true);
+    setAccountError("");
+    const result = await onSaveAccount(patch);
+    setSaving(false);
+    if (result.ok) setEditing(false);
+    else setAccountError(result.error);
+  };
+
+  const fieldLabel = { fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 };
+  const readBox = { padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151", minHeight: 18 };
+  const inputStyle = { width: "100%", boxSizing: "border-box", padding: "10px 14px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, fontFamily: "DM Sans, sans-serif", color: "#374151", background: "#fff", outline: "none" };
+  const hintStyle = { fontSize: 11, color: "#9ca3af", marginTop: 4 };
+  const emailLocked = authProvider === "google";
 
   return (
     <div className="page-card" style={{ maxWidth: 560, margin: "0 auto", width: "100%" }}>
@@ -3330,27 +3365,72 @@ function Profile({ onSignOut, userName, userEmail, role, notifications, setNotif
       </div>
 
       <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>Account details</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Account details</div>
+          {!editing && (
+            <button
+              onClick={startEditing}
+              style={{ padding: "5px 12px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", color: "#2563eb", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+              Edit
+            </button>
+          )}
+        </div>
         <div style={{ display: "grid", gap: 10 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <div>
-              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Full name</div>
-              <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>{userName || "User"}</div>
+              <div style={fieldLabel}>Full name</div>
+              {editing
+                ? <input value={draft.name} maxLength={100} onChange={e => setDraft({ ...draft, name: e.target.value })} style={inputStyle} />
+                : <div style={readBox}>{userName || "User"}</div>}
             </div>
             <div>
-              <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Role</div>
-              <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>{ROLE_LABELS[role] || "Security Analyst"}</div>
+              <div style={fieldLabel}>Role</div>
+              {editing && role === "admin"
+                ? (
+                  <select value={draft.role} onChange={e => setDraft({ ...draft, role: e.target.value })} style={inputStyle}>
+                    {Object.entries(ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  </select>
+                )
+                : <div style={readBox}>{ROLE_LABELS[role] || "Security Analyst"}</div>}
+              {editing && role !== "admin" && <div style={hintStyle}>Only an Admin can change roles</div>}
             </div>
           </div>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Email</div>
-            <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>{userEmail || "user@organisation.com"}</div>
+            <div style={fieldLabel}>Email</div>
+            {editing && !emailLocked
+              ? <input type="email" value={draft.email} onChange={e => setDraft({ ...draft, email: e.target.value })} style={inputStyle} />
+              : <div style={readBox}>{userEmail || "user@organisation.com"}</div>}
+            {editing && emailLocked && <div style={hintStyle}>Managed by your Google account</div>}
           </div>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", marginBottom: 4 }}>Organisation</div>
-            <div style={{ padding: "10px 14px", background: "#f9fafb", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, color: "#374151" }}>Queensland University of Technology</div>
+            <div style={fieldLabel}>Organisation</div>
+            {editing && role === "admin"
+              ? <input value={draft.organisation} maxLength={120} placeholder="Add your organisation" onChange={e => setDraft({ ...draft, organisation: e.target.value })} style={inputStyle} />
+              : <div style={readBox}>{organisation}</div>}
+            {editing && role === "admin" && <div style={hintStyle}>Shared with everyone on this server</div>}
+            {editing && role !== "admin" && <div style={hintStyle}>Set by your Admin</div>}
           </div>
         </div>
+
+        {editing && (
+          <div style={{ marginTop: 12 }}>
+            {accountError && <div style={{ fontSize: 12, color: "#dc2626", marginBottom: 8 }}>{accountError}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={saveEditing}
+                disabled={saving}
+                style={{ padding: "8px 18px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: saving ? "default" : "pointer", opacity: saving ? 0.7 : 1 }}>
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button
+                onClick={cancelEditing}
+                disabled={saving}
+                style={{ padding: "8px 18px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", color: "#374151", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={{ marginBottom: 24 }}>
@@ -3900,6 +3980,11 @@ export default function App() {
   // "analyst" only as a display fallback for the brief window before the
   // first of those responses arrives; every real gate lives server-side.
   const [role, setRole] = useState("analyst");
+  // Profile "Account details" fields that live on the server (see auth.py's
+  // organisation / auth_provider columns). Organisation stays blank until
+  // the user fills it in; authProvider decides whether email is editable.
+  const [organisation, setOrganisation] = useState("");
+  const [authProvider, setAuthProvider] = useState("local");
   const [notifications, setNotifications] = useState(DEFAULT_PROFILE_PREFS.notifications);
   // Fine-grained email controls, only relevant while `notifications` (the
   // master switch, off by default) is on — see auth.py's notify_level /
@@ -3980,6 +4065,8 @@ export default function App() {
         if (data.authenticated) {
           setUserName(data.name);
           setUserEmail(data.email);
+          setOrganisation(data.organisation || "");
+          setAuthProvider(data.authProvider || "local");
           setAuthed(true);
           const prefs = loadProfilePrefs(data.email);
           // notifyOnCritical/mfaEnabled are authoritative from the server
@@ -4030,6 +4117,30 @@ export default function App() {
     setNotifyLevel(level);
     setNotifyOnJira(jira);
     saveNotificationSettings({ level, jira });
+  };
+
+  // Saves edits to the Profile page's Account details (PATCH
+  // /api/auth/profile in auth.py). Resolves to {ok, error} so the form can
+  // stay open and show the server's message (duplicate email, last Admin,
+  // etc). On success the server's copy is what we display.
+  const saveAccountDetails = async (patch) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/profile`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: data.error || "Couldn't save your changes" };
+      setUserName(data.name);
+      setUserEmail(data.email);
+      setOrganisation(data.organisation || "");
+      setRole(data.role || "analyst");
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "Couldn't save your changes" };
+    }
   };
 
   // Flips the Two-factor authentication toggle and persists it server-side
@@ -4109,6 +4220,8 @@ export default function App() {
                 onSignIn={data => {
                   setUserName(data.name);
                   setUserEmail(data.email);
+                  setOrganisation(data.organisation || "");
+                  setAuthProvider(data.authProvider || "local");
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
                   applyNotificationPrefs(data);
@@ -4128,6 +4241,8 @@ export default function App() {
                 onSignUp={data => {
                   setUserName(data.name);
                   setUserEmail(data.email);
+                  setOrganisation(data.organisation || "");
+                  setAuthProvider(data.authProvider || "local");
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
                   applyNotificationPrefs(data);
@@ -4143,6 +4258,8 @@ export default function App() {
                 onVerified={data => {
                   setUserName(data.name);
                   setUserEmail(data.email);
+                  setOrganisation(data.organisation || "");
+                  setAuthProvider(data.authProvider || "local");
                   setAuthed(true);
                   const prefs = loadProfilePrefs(data.email);
                   applyNotificationPrefs(data);
@@ -4213,6 +4330,8 @@ export default function App() {
               setAuthScreen("signin");
               setUserName("");
               setUserEmail("");
+              setOrganisation("");
+              setAuthProvider("local");
               setMfaEmail("");
               setRole("analyst");
               setShowBusinessContext(false);
@@ -4220,6 +4339,9 @@ export default function App() {
             userName={userName}
             userEmail={userEmail}
             role={role}
+            organisation={organisation}
+            authProvider={authProvider}
+            onSaveAccount={saveAccountDetails}
             notifications={notifications}
             setNotifications={updateNotifications}
             notifyLevel={notifyLevel}

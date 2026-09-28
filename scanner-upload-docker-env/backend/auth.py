@@ -18,6 +18,8 @@ Endpoints registered by this blueprint (mounted at /api/auth):
   POST /api/auth/login     -> body {email, password}; checks credentials, signs in
   POST /api/auth/logout    -> clears the session
   GET  /api/auth/me        -> {authenticated, name, email} for the current session
+  PATCH /api/auth/profile  -> body any of {name, email, organisation, role}; edits
+                              the signed-in user's own account details (role: Admin only)
 
 This is a demo-scale setup (single SQLite file, no email verification, no
 password reset, no rate limiting on login attempts) — enough to show real
@@ -152,6 +154,36 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN notify_level TEXT NOT NULL DEFAULT 'critical'")
         if "notify_on_jira" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN notify_on_jira INTEGER NOT NULL DEFAULT 0")
+        # Legacy per-user "Organisation" column. Organisation is now ONE
+        # server-wide value set by an Admin (see app_settings below) that
+        # every account inherits, so this column is no longer read or
+        # written -- it's kept only so old databases still have it and so
+        # the one-time migration below can carry an existing value over.
+        if "organisation" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN organisation TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        # One-time migration: if no org-wide value exists yet, seed it from
+        # the oldest Admin's previously self-entered organisation (if any),
+        # so existing installs don't silently lose it.
+        if conn.execute("SELECT 1 FROM app_settings WHERE key = 'organisation'").fetchone() is None:
+            seed = conn.execute(
+                """
+                SELECT organisation FROM users
+                WHERE role = 'admin' AND TRIM(organisation) != ''
+                ORDER BY created_at ASC, id ASC LIMIT 1
+                """
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('organisation', ?)",
+                (seed["organisation"].strip() if seed else "",),
+            )
         if "mfa_enabled" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
         if "mfa_code_hash" not in existing_cols:
@@ -193,6 +225,17 @@ def _password_error(password):
 NOTIFY_LEVELS = ("none", "critical", "high", "medium")
 
 
+def get_organisation():
+    """The organisation name an Admin has set for this server. Every
+    account inherits it -- it isn't stored per user."""
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = 'organisation'").fetchone()
+    finally:
+        conn.close()
+    return (row["value"] if row else "") or ""
+
+
 def _user_to_json(row):
     return {
         "name": row["name"],
@@ -203,6 +246,7 @@ def _user_to_json(row):
         "notifyOnJira": bool(row["notify_on_jira"]),
         "mfaEnabled": bool(row["mfa_enabled"]),
         "role": row["role"],
+        "organisation": get_organisation(),
     }
 
 
@@ -431,6 +475,110 @@ def me():
         return jsonify({"authenticated": False})
 
     return jsonify({"authenticated": True, **_user_to_json(row)})
+
+
+MAX_NAME_LEN = 100
+MAX_ORGANISATION_LEN = 120
+
+
+@auth_bp.route("/profile", methods=["PATCH"])
+def update_profile():
+    """Backs the Profile page's editable "Account details".
+
+    Body -- any combination of, at least one required:
+      {"name": str}          required non-empty if sent
+      {"email": str}         must be valid and not already taken by another
+                             account (409 if it is). Refused (400) for Google
+                             accounts: their email IS their Google identity
+                             (google_auth.py matches on it), so changing it
+                             here would orphan the link.
+      {"organisation": str}  ADMIN ONLY. One organisation name shared by
+                             every account on this server -- non-admins
+                             inherit whatever an Admin sets and can't
+                             change it (403). Free text, may be blank.
+      {"role": str}          ADMIN ONLY. Roles are the access-control system
+                             (see require_role), so a non-admin can't change
+                             their own -- that would let anyone promote
+                             themselves. Same last-Admin protection as
+                             update_user_role().
+
+    Returns the updated user (same shape as /me)."""
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": "You must be signed in"}), 401
+
+    body = request.get_json(silent=True) or {}
+    conn = _get_db()
+    try:
+        current = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not current:
+            session.clear()
+            return jsonify({"error": "You must be signed in"}), 401
+
+        updates = {}
+
+        if "name" in body:
+            name = str(body["name"] or "").strip()
+            if not name:
+                return jsonify({"error": "Name can't be empty"}), 400
+            if len(name) > MAX_NAME_LEN:
+                return jsonify({"error": f"Name must be {MAX_NAME_LEN} characters or fewer"}), 400
+            updates["name"] = name
+
+        if "email" in body:
+            email = str(body["email"] or "").strip().lower()
+            if not EMAIL_RE.match(email):
+                return jsonify({"error": "Please enter a valid email address"}), 400
+            if email != (current["email"] or "").lower():
+                if current["auth_provider"] == "google":
+                    return jsonify({"error": "This account signs in with Google, so its email can't be changed here"}), 400
+                updates["email"] = email
+
+        new_organisation = None
+        if "organisation" in body:
+            organisation = str(body["organisation"] or "").strip()
+            if len(organisation) > MAX_ORGANISATION_LEN:
+                return jsonify({"error": f"Organisation must be {MAX_ORGANISATION_LEN} characters or fewer"}), 400
+            # Only act on an actual change, so a non-admin whose client
+            # echoes back the value they inherited isn't rejected.
+            if organisation != get_organisation():
+                if current["role"] != "admin":
+                    return jsonify({"error": "Only an Admin can change the organisation"}), 403
+                new_organisation = organisation
+
+        if "role" in body and body["role"] != current["role"]:
+            if body["role"] not in VALID_ROLES:
+                return jsonify({"error": f"role must be one of {', '.join(VALID_ROLES)}"}), 400
+            if current["role"] != "admin":
+                return jsonify({"error": "Only an Admin can change roles"}), 403
+            admin_count = conn.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").fetchone()["n"]
+            if admin_count <= 1:
+                return jsonify({"error": "Can't remove the last Admin. Promote someone else first."}), 400
+            updates["role"] = body["role"]
+
+        if not body:
+            return jsonify({"error": "Nothing to update"}), 400
+
+        if updates:
+            # Column names come from the fixed dict above, never from user input.
+            assignments = ", ".join(f"{col} = ?" for col in updates)
+            try:
+                conn.execute(f"UPDATE users SET {assignments} WHERE id = ?", (*updates.values(), user_id))
+                conn.commit()
+            except sqlite3.IntegrityError:
+                return jsonify({"error": "An account with this email already exists"}), 409
+        if new_organisation is not None:
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('organisation', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (new_organisation,),
+            )
+            conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    finally:
+        conn.close()
+
+    return jsonify(_user_to_json(row))
 
 
 @auth_bp.route("/notifications", methods=["PATCH"])
