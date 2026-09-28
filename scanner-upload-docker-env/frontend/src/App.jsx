@@ -1,10 +1,15 @@
 import { useState, useRef, useEffect } from "react";
 import Tutorial, { hasCompletedTutorial } from "./Tutorial";
+import { Term } from "./Glossary";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 
 // Base URL for the scanner-upload backend (Flask). Update this if the
 // backend runs somewhere other than localhost:5000 (e.g. in docker-compose).
 const API_BASE = "http://localhost:5000";
+
+// Column headers that get a hover explanation. Anything not listed here
+// renders as plain text. Definitions live in Glossary.jsx.
+const HEADER_TERMS = { CVE: "cve", CVSS: "cvss", Severity: "severity", Asset: "asset", Priority: "priority" };
 
 //Placeholder cve details
 // NOTE: allRisks / vulnRows / validationRows / cveDetails below start out as
@@ -1483,7 +1488,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
               <div style={{ fontSize: 12, color: "#dc2626" }}>Couldn't reach the backend to list scanners. Is it running?</div>
             )}
             <div data-tutorial="scanner-select">
-              <label style={labelStyle}>Scanner</label>
+              <label style={labelStyle}><Term k="scanner">Scanner</Term></label>
               <select style={inputStyle} value={scannerName} onChange={e => setScannerName(e.target.value)} disabled={liveStatus === "scanning"}>
                 {(scanners ? Object.keys(scanners) : ["trivy", "tenable"]).map(name => (
                   <option key={name} value={name} disabled={scanners && !scanners[name].supportsLiveScan}>
@@ -1495,7 +1500,9 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
 
             <div data-tutorial="scan-target-field">
               <label style={labelStyle}>
-                {scannerName === "tenable" ? "Tenable scan ID" : "Image, path, or repo to scan"}
+                {scannerName === "tenable"
+                  ? <Term k="tenableScanId">Tenable scan ID</Term>
+                  : <Term k="imageTarget">Image, path, or repo to scan</Term>}
               </label>
               <input
                 style={inputStyle}
@@ -1515,7 +1522,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
             {scannerName === "trivy" && (
               <div style={{ display: "flex", gap: 12 }}>
                 <div style={{ flex: 1 }}>
-                  <label style={labelStyle}>Scan type</label>
+                  <label style={labelStyle}><Term k="scanType">Scan type</Term></label>
                   <select style={inputStyle} value={trivyScanType} onChange={e => setTrivyScanType(e.target.value)} disabled={liveStatus === "scanning"}>
                     <option value="image">Container image</option>
                     <option value="fs">Filesystem path</option>
@@ -1523,7 +1530,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
                   </select>
                 </div>
                 <div style={{ flex: 1 }}>
-                  <label style={labelStyle}>Runs via</label>
+                  <label style={labelStyle}><Term k="runsVia">Runs via</Term></label>
                   <select style={inputStyle} value={trivyRunMode} onChange={e => setTrivyRunMode(e.target.value)} disabled={liveStatus === "scanning"}>
                     <option value="local">Trivy CLI on backend host</option>
                     <option value="docker">Docker (aquasec/trivy)</option>
@@ -1545,7 +1552,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
             )}
             {scannerName === "trivy" && trivyScanType === "image" && !registryStatus.connected && (
               <div data-tutorial="private-registry-note" style={{ fontSize: 12, color: "#9ca3af" }}>
-                No private registry connected — go to Profile to connect one if you need to scan a private image.
+                No private <Term k="registry">registry</Term> connected — go to Profile to connect one if you need to scan a private image.
               </div>
             )}
 
@@ -1694,11 +1701,11 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
                 <div className="ai-stat-val">{total}</div>
               </div>
               <div className="ai-stat">
-                <div className="ai-stat-label">Critical Risk</div>
+                <div className="ai-stat-label"><Term k="severity">Critical</Term> Risk</div>
                 <div className="ai-stat-val" style={{ color: "#dc2626" }}>{critical}</div>
               </div>
               <div className="ai-stat">
-                <div className="ai-stat-label">Average CVSS</div>
+                <div className="ai-stat-label">Average <Term k="cvss">CVSS</Term></div>
                 <div className="ai-stat-val orange">{avgCvss}</div>
               </div>
             </div>
@@ -1722,9 +1729,9 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
             totalCount={allRisks.length}
           />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 60px", gap: 8, padding: "0 0 6px 0", borderBottom: "1px solid #e5e7eb", marginBottom: 4 }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af" }}>CVE</span>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af" }}>SEVERITY</span>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textAlign: "right" }}>CVSS</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af" }}><Term k="cve">CVE</Term></span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af" }}><Term k="severity">SEVERITY</Term></span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textAlign: "right" }}><Term k="cvss">CVSS</Term></span>
           </div>
           {filteredRisks.length === 0 && (
             <div style={{ padding: "12px 0", fontSize: 12, color: "#9ca3af" }}>No vulnerabilities match your filters.</div>
@@ -1781,7 +1788,7 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
                 </div>
                 <div className="ai-chip">
                   <div className="ai-chip-val">{flaggedCount} Flagged for Review</div>
-                  <div className="ai-chip-desc">Low AI confidence or incomplete data</div>
+                  <div className="ai-chip-desc">Low AI confidence or incomplete data — possible <Term k="falsePositive">false positives</Term></div>
                 </div>
               </div>
             );
@@ -1854,11 +1861,11 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
 
         <div className="cve-scores" style={d.businessPriorityScore != null ? { gridTemplateColumns: "1fr 1fr 1fr" } : undefined}>
           <div className="cve-score-card">
-            <div className="cve-score-label">CVSS Score</div>
+            <div className="cve-score-label"><Term k="cvss">CVSS Score</Term></div>
             <div className="cve-score-val" style={{ color: cvssColor }}>{d.cvss}</div>
           </div>
           <div className="cve-score-card">
-            <div className="cve-score-label">AI Confidence</div>
+            <div className="cve-score-label"><Term k="aiConfidence">AI Confidence</Term></div>
             <div className="cve-score-val" style={{ color: confColor }}>{d.confidence}%</div>
             <div className="cve-score-sub">Validated against NVD & vendor advisory</div>
           </div>
@@ -1866,7 +1873,7 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
             const band = criticalityBand(d.businessPriorityScore, d.cvss);
             return (
               <div className="cve-score-card">
-                <div className="cve-score-label">Business Criticality</div>
+                <div className="cve-score-label"><Term k="businessCriticality">Business Criticality</Term></div>
                 <div
                   className="cve-score-val"
                   style={{ color: band.color, fontSize: 20, lineHeight: 1.2 }}
@@ -2079,11 +2086,11 @@ function SelectStep({ onNext, onBack, selected, setSelected, onCveClick }) {
             <thead>
               <tr>
                 <th><input type="checkbox" className="cb" checked={allChecked} onChange={toggleAll} /></th>
-                <th>CVE</th>
+                <th><Term k="cve">CVE</Term></th>
                 <th>Title</th>
-                <th>Severity</th>
-                <th>CVSS</th>
-                <th>Asset</th>
+                <th><Term k="severity">Severity</Term></th>
+                <th><Term k="cvss">CVSS</Term></th>
+                <th><Term k="asset">Asset</Term></th>
               </tr>
             </thead>
             <tbody>
@@ -2197,7 +2204,7 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
                 {row.status === "Validated"
                   ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                   : <span style={{ fontSize: 14 }}>✋</span>}
-                {row.status}
+                <Term k={row.status === "Validated" ? "validated" : "needsReview"}>{row.status}</Term>
               </span>
               {row.status === "Needs Review" && (
                 <button
@@ -2761,7 +2768,7 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
           {/* Table header */}
           <div style={{ display: "grid", gridTemplateColumns: "60px 120px 1fr 60px 80px 100px 90px", gap: 8, padding: "8px 0", borderBottom: "1px solid #e5e7eb" }}>
             {["Ticket", "CVE", "Title", "Priority", "Status", "Assigned", "Date"].map(h => (
-              <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</div>
+              <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}><Term k={HEADER_TERMS[h]}>{h}</Term></div>
             ))}
           </div>
         </div>
@@ -3064,8 +3071,11 @@ function RegistryConnect() {
 
   return (
     <div style={{ padding: "12px 16px", background: "#f9fafb", borderRadius: 10, border: "1px solid #e5e7eb", display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}>Private registry (Trivy)</div>
+      <div style={{ fontSize: 13, fontWeight: 500, color: "#374151" }}><Term k="registry">Private registry</Term> (Trivy)</div>
       <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>Scan private images by connecting one registry here — no server config needed.</div>
+      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>
+        Not sure what to enter? Hover: <Term k="registryHost">registry host</Term>, <Term k="registryToken">access token</Term>.
+      </div>
       <input
         style={fieldStyle}
         placeholder="Registry host, e.g. ghcr.io"
@@ -3452,9 +3462,9 @@ function Dashboard() {
             )}
           </div>
         </div>
-        <div className="stat-card"><div className="stat-label">Critical</div><div className="stat-value critical">{summary?.critical ?? "—"}</div></div>
+        <div className="stat-card"><div className="stat-label"><Term k="severity">Critical</Term></div><div className="stat-value critical">{summary?.critical ?? "—"}</div></div>
         <div className="stat-card"><div className="stat-label">Medium</div><div className="stat-value medium">{summary?.medium ?? "—"}</div></div>
-        <div className="stat-card"><div className="stat-label">New (last scan)</div><div className="stat-value">{summary?.newSinceLastScan ?? "—"}</div></div>
+        <div className="stat-card"><div className="stat-label"><Term k="newSinceLastScan">New (last scan)</Term></div><div className="stat-value">{summary?.newSinceLastScan ?? "—"}</div></div>
       </div>
       <div className="mid-row">
         <div className="chart-card">
@@ -3548,8 +3558,8 @@ function ScanHistory() {
       <div className="stats-row">
         <div className="stat-card"><div className="stat-label">Total Scans</div><div className="stat-value">{data?.hasScans ? totals.scanCount : "—"}</div></div>
         <div className="stat-card"><div className="stat-label">Avg Findings / Scan</div><div className="stat-value">{data?.hasScans ? totals.avgFindingsPerScan : "—"}</div></div>
-        <div className="stat-card"><div className="stat-label">Unique CVEs Seen</div><div className="stat-value">{data?.hasScans ? totals.uniqueCvesSeen : "—"}</div></div>
-        <div className="stat-card"><div className="stat-label">Resolved CVEs</div><div className="stat-value" style={{ color: "#16a34a" }}>{data?.hasScans ? totals.resolvedCves : "—"}</div></div>
+        <div className="stat-card"><div className="stat-label"><Term k="uniqueCves">Unique CVEs Seen</Term></div><div className="stat-value">{data?.hasScans ? totals.uniqueCvesSeen : "—"}</div></div>
+        <div className="stat-card"><div className="stat-label"><Term k="resolvedCves">Resolved CVEs</Term></div><div className="stat-value" style={{ color: "#16a34a" }}>{data?.hasScans ? totals.resolvedCves : "—"}</div></div>
       </div>
 
       <div className="chart-card" style={{ marginBottom: 12 }}>
@@ -3588,7 +3598,7 @@ function ScanHistory() {
             <div style={{ overflowY: "auto", maxHeight: 260 }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 90px 90px 110px", gap: 8, padding: "4px 0 8px", borderBottom: "1px solid #e5e7eb", position: "sticky", top: 0, background: "#fff" }}>
                 {["CVE", "Appeared In", "First Seen", "Last Seen", "In Latest Scan"].map(h => (
-                  <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</div>
+                  <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}><Term k={HEADER_TERMS[h]}>{h}</Term></div>
                 ))}
               </div>
               {recurring.map(r => (
@@ -3639,7 +3649,7 @@ function ScanHistory() {
           <div style={{ overflowY: "auto" }}>
             <div style={{ display: "grid", gridTemplateColumns: "110px 90px 1fr 60px 60px 60px 60px 60px", gap: 8, padding: "6px 0", borderBottom: "1px solid #e5e7eb", position: "sticky", top: 0, background: "#fff" }}>
               {["Date", "Scanner", "Target", "Total", "Crit", "High", "Med", "Low"].map(h => (
-                <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}>{h}</div>
+                <div key={h} style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em" }}><Term k={HEADER_TERMS[h]}>{h}</Term></div>
               ))}
             </div>
             {scans.map(s => (
