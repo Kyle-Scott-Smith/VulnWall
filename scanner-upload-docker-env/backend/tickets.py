@@ -19,7 +19,10 @@ Full scan-history persistence is a separate, bigger piece of work
 Endpoints registered by this blueprint (mounted at /api/tickets):
   GET   /api/tickets              -> list the signed-in user's tickets
   POST  /api/tickets              -> body: array of ticket objects; bulk-saves them
-  PATCH /api/tickets/<ticket_ref> -> body: {status, assigned}; updates one ticket
+  PATCH /api/tickets/<ticket_ref> -> body: {status, assigned}; updates one ticket.
+                                      Status changes on Jira-linked tickets are
+                                      pushed to Jira first and rejected if Jira
+                                      refuses (see update_ticket).
   POST  /api/tickets/sync         -> pulls current status from Jira for every
                                       ticket linked to a Jira issue (jira_issue_key
                                       set) and updates the local status to match.
@@ -32,6 +35,12 @@ from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request, session
 
 from auth import _get_db, require_role
+from jira_integration import (
+    STATUS_TO_JIRA_CATEGORY,
+    fetch_issue_status_category,
+    get_connection_record,
+    transition_issue_to_category,
+)
 
 tickets_bp = Blueprint("tickets", __name__, url_prefix="/api/tickets")
 
@@ -74,6 +83,11 @@ def init_tickets_db():
             conn.execute("ALTER TABLE tickets ADD COLUMN jira_issue_key TEXT")
         if "jira_url" not in existing_cols:
             conn.execute("ALTER TABLE tickets ADD COLUMN jira_url TEXT")
+        # When this ticket's state was last confirmed to match Jira (a
+        # successful sync check or a successful push). NULL = never
+        # confirmed, which the UI shows as such rather than "synced".
+        if "jira_synced_at" not in existing_cols:
+            conn.execute("ALTER TABLE tickets ADD COLUMN jira_synced_at TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -98,6 +112,8 @@ def _row_to_json(row):
         "why": row["why"],
         "jiraIssueKey": row["jira_issue_key"],
         "jiraUrl": row["jira_url"],
+        "jiraLinked": bool(row["jira_issue_key"]),
+        "jiraSyncedAt": row["jira_synced_at"],
     }
 
 
@@ -143,8 +159,8 @@ def create_tickets():
                 INSERT INTO tickets (
                     user_id, ticket_ref, cve, title, priority, status,
                     assigned, date, cvss, confidence, fixes, why,
-                    jira_issue_key, jira_url, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    jira_issue_key, jira_url, jira_synced_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, ticket_ref) DO UPDATE SET
                     cve=excluded.cve,
                     title=excluded.title,
@@ -158,6 +174,7 @@ def create_tickets():
                     why=excluded.why,
                     jira_issue_key=COALESCE(excluded.jira_issue_key, tickets.jira_issue_key),
                     jira_url=COALESCE(excluded.jira_url, tickets.jira_url),
+                    jira_synced_at=COALESCE(excluded.jira_synced_at, tickets.jira_synced_at),
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -166,6 +183,7 @@ def create_tickets():
                     t.get("date"), t.get("cvss"), t.get("confidence"),
                     json.dumps(t.get("fixes") or []), t.get("why"),
                     t.get("jiraIssueKey"), t.get("jiraUrl"),
+                    now if t.get("jiraIssueKey") else None,  # just created in Jira = in sync
                     now, now,
                 ),
             )
@@ -183,8 +201,19 @@ def create_tickets():
 @tickets_bp.route("/<ticket_ref>", methods=["PATCH"])
 @require_role("admin", "analyst")
 def update_ticket(ticket_ref):
-    """Body: {status, assigned} — either or both. Matches the fields
-    TicketList's edit form actually lets a user change."""
+    """Body: {status, assigned} — either or both.
+
+    Status changes on a ticket linked to a Jira issue are applied in Jira
+    FIRST; only if Jira accepts the change is it saved locally. If Jira
+    can't be reached / refuses, nothing is saved and the caller gets an
+    error (502/409) — previously the change was saved locally only and
+    silently reverted on the next sync, while the UI implied it had synced.
+
+    `assigned` is a team name in this app and has no Jira equivalent, so it
+    is always local-only (the UI says so).
+
+    Tickets that were never pushed to Jira are updated locally, and the
+    response's jiraLinked=false tells the UI that's all that happened."""
     user_id = _require_login()
     if not user_id:
         return jsonify({"error": "You must be signed in"}), 401
@@ -194,6 +223,8 @@ def update_ticket(ticket_ref):
     assigned = body.get("assigned")
     if status is None and assigned is None:
         return jsonify({"error": "Nothing to update"}), 400
+    if status is not None and status not in STATUS_TO_JIRA_CATEGORY:
+        return jsonify({"error": f"Unknown status '{status}'"}), 400
 
     conn = _get_db()
     try:
@@ -204,15 +235,33 @@ def update_ticket(ticket_ref):
         if not row:
             return jsonify({"error": "Ticket not found"}), 404
 
+        now = datetime.now(timezone.utc).isoformat()
+        synced_at = None  # set only if this request confirmed the state with Jira
+
+        if status is not None and status != row["status"] and row["jira_issue_key"]:
+            record = get_connection_record()
+            if not record:
+                return jsonify({
+                    "error": f"This ticket is linked to {row['jira_issue_key']} in Jira, but Jira isn't "
+                             f"connected. Reconnect Jira in Profile to change its status. Nothing was changed.",
+                }), 409
+            ok, error = transition_issue_to_category(
+                record, row["jira_issue_key"], STATUS_TO_JIRA_CATEGORY[status]
+            )
+            if not ok:
+                return jsonify({"error": f"{error} Nothing was changed."}), 502
+            synced_at = now
+
         conn.execute(
             """
             UPDATE tickets SET
                 status = COALESCE(?, status),
                 assigned = COALESCE(?, assigned),
+                jira_synced_at = COALESCE(?, jira_synced_at),
                 updated_at = ?
             WHERE user_id = ? AND ticket_ref = ?
             """,
-            (status, assigned, datetime.now(timezone.utc).isoformat(), user_id, ticket_ref),
+            (status, assigned, synced_at, now, user_id, ticket_ref),
         )
         conn.commit()
 
@@ -259,14 +308,9 @@ def sync_with_jira():
     if not user_id:
         return jsonify({"error": "You must be signed in"}), 401
 
-    # Imported here rather than at module load time to avoid a circular
-    # import (jira_integration.py doesn't import tickets.py, but keeping
-    # this import local makes that non-dependency explicit).
-    from jira_integration import get_connection_record, fetch_issue_status_category
-
     record = get_connection_record()
     if not record:
-        return jsonify({"error": "No Jira account connected."}), 400
+        return jsonify({"error": "No Jira account connected.", "code": "jira_not_connected"}), 400
 
     conn = _get_db()
     try:
@@ -276,18 +320,25 @@ def sync_with_jira():
         ).fetchall()
 
         updated = 0
+        failed = []  # issue keys we couldn't check — reported to the UI, never hidden
         now = datetime.now(timezone.utc).isoformat()
         for row in rows:
             category = fetch_issue_status_category(record, row["jira_issue_key"])
             if category is None:
-                continue  # lookup failed (deleted issue, permissions, network) — leave local status alone
+                # Lookup failed (deleted issue, permissions, network). Leave
+                # the local status alone, but say so — and don't stamp it
+                # as freshly synced.
+                failed.append(row["jira_issue_key"])
+                continue
             mapped_status = _JIRA_CATEGORY_TO_STATUS.get(category)
             if mapped_status and mapped_status != row["status"]:
                 conn.execute(
-                    "UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?",
-                    (mapped_status, now, row["id"]),
+                    "UPDATE tickets SET status = ?, jira_synced_at = ?, updated_at = ? WHERE id = ?",
+                    (mapped_status, now, now, row["id"]),
                 )
                 updated += 1
+            else:
+                conn.execute("UPDATE tickets SET jira_synced_at = ? WHERE id = ?", (now, row["id"]))
         conn.commit()
 
         all_rows = conn.execute(
@@ -296,7 +347,13 @@ def sync_with_jira():
     finally:
         conn.close()
 
-    return jsonify({"updated": updated, "tickets": [_row_to_json(r) for r in all_rows]})
+    return jsonify({
+        "updated": updated,
+        "checked": len(rows),
+        "failed": failed,
+        "syncedAt": now,
+        "tickets": [_row_to_json(r) for r in all_rows],
+    })
 
 
 init_tickets_db()

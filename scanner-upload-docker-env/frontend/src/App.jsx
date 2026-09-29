@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import Tutorial, { hasCompletedTutorial } from "./Tutorial";
 import { Term } from "./Glossary";
+import { evidenceLinks, formatSyncedAt } from "./evidence";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 
 // Base URL for the scanner-upload backend (Flask). Update this if the
@@ -137,6 +138,7 @@ export function applyScanResults(vulnerabilities, meta) {
       priorityTier: v.priority_tier || null,
       aiGenerated: !!v.ai_generated,
       businessPriorityScore: typeof v.business_priority_score === "number" ? v.business_priority_score : null,
+      references: Array.isArray(v.references) || typeof v.references === "string" ? v.references : [],
     }];
   }));
 
@@ -1834,7 +1836,10 @@ export function splitSummary(text) {
 function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
   const d = cveDetails[cveId];
   const cvssColor = d.cvss >= 9 ? "#dc2626" : d.cvss >= 7 ? "#f97316" : "#ca8a04";
-  const confColor = d.confidence >= 90 ? "#22c55e" : "#f97316";
+  // Deliberately neutral: a green 95% read as a stamp of approval to testers
+  // and lowered trust. Only flag the low end, where a human should look.
+  const confColor = d.confidence < 60 ? "#f97316" : "#374151";
+  const evidence = evidenceLinks(cveId, d.references);
 
   const tabs = [
     { key: "why", label: "Why This Matters", text: d.why },
@@ -1867,7 +1872,7 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
           <div className="cve-score-card">
             <div className="cve-score-label"><Term k="aiConfidence">AI Confidence</Term></div>
             <div className="cve-score-val" style={{ color: confColor }}>{d.confidence}%</div>
-            <div className="cve-score-sub">Validated against NVD & vendor advisory</div>
+            <div className="cve-score-sub">AI estimate, not a verified figure</div>
           </div>
           {d.businessPriorityScore != null && (() => {
             const band = criticalityBand(d.businessPriorityScore, d.cvss);
@@ -1886,6 +1891,18 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
             );
           })()}
         </div>
+
+        {(evidence.records.length > 0 || evidence.references.length > 0) && (
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, margin: "0 0 16px", fontSize: 12, color: "#6b7280" }}>
+            <span style={{ fontWeight: 600, color: "#374151" }}>Check the sources:</span>
+            {[...evidence.records, ...evidence.references].map(l => (
+              <a key={l.url} href={l.url} target="_blank" rel="noopener noreferrer"
+                style={{ padding: "3px 10px", borderRadius: 20, border: "1px solid #e5e7eb", color: "#2563eb", textDecoration: "none", fontWeight: 500 }}>
+                {l.label} ↗
+              </a>
+            ))}
+          </div>
+        )}
 
         <div className="cve-tab-bar">
           {tabs.map(t => (
@@ -2463,6 +2480,9 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
   const [sent, setSent] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState(null);
+  // How many tickets Jira actually accepted — the success screen reports
+  // this instead of assuming every ticket made it.
+  const [jiraSentCount, setJiraSentCount] = useState(0);
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState("All");
   const [sortBy, setSortBy] = useState("None");
@@ -2483,9 +2503,18 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
     return (
       <>
         <div className="page-card" style={{ alignItems: "center", justifyContent: "center", gap: 16, minHeight: 300 }}>
-          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#f0fdf4", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>✓</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: "#111" }}>Tickets sent to Jira</div>
-          <div style={{ fontSize: 13, color: "#6b7280" }}>{tickets.length} ticket{tickets.length !== 1 ? "s" : ""} successfully created</div>
+          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#f0fdf4", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>{jiraSentCount === tickets.length ? "✓" : "!"}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#111" }}>
+            {jiraSentCount === tickets.length ? "Tickets sent to Jira" : jiraSentCount === 0 ? "Tickets saved, but not sent to Jira" : "Tickets partly sent to Jira"}
+          </div>
+          <div style={{ fontSize: 13, color: "#6b7280" }}>
+            {jiraSentCount} of {tickets.length} ticket{tickets.length !== 1 ? "s" : ""} created in Jira
+          </div>
+          {sendError && (
+            <div style={{ maxWidth: 460, textAlign: "center", padding: "10px 14px", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, fontSize: 12, color: "#92400e", lineHeight: 1.5 }}>
+              {sendError}
+            </div>
+          )}
           <button onClick={onNext} className="btn btn-primary" style={{ marginTop: 8 }}>Go to Tickets</button>
         </div>
         <Footer step={5} onBack={onBack} hideNext />
@@ -2583,11 +2612,14 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
                       }
                     }
                     if (jiraFailures > 0) {
-                      setSendError(`${jiraFailures} of ${tickets.length} ticket(s) failed to push to Jira. They were still added to the local ticket list below.`);
+                      setSendError(`${jiraFailures} of ${tickets.length} ticket(s) failed to push to Jira. They were saved in this app only and are marked "Not in Jira" on the Tickets page.`);
                     }
+                  } else {
+                    // Previously this path was silent, so tickets looked sent.
+                    setSendError("Jira isn't connected, so nothing was sent to Jira. These tickets were saved in this app only. Connect Jira in Profile to send tickets there.");
                   }
                 } catch {
-                  setSendError("Couldn't reach the Jira integration — tickets were still added to the local ticket list below.");
+                  setSendError("Couldn't reach the Jira integration, so nothing was sent to Jira. These tickets were saved in this app only.");
                 }
 
                 const newTickets = tickets.map((t, i) => ({
@@ -2656,6 +2688,7 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
                 }
 
                 onSubmit(newTickets);
+                setJiraSentCount(Object.keys(jiraResults).length);
                 setSending(false);
                 setSent(true);
               }}
@@ -2690,6 +2723,14 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
   // next to the Sync button so it's clear something actually happened
   // (or didn't) rather than the button just silently doing nothing.
   const [syncState, setSyncState] = useState("idle");
+  // Details from the last sync attempt so the header can say exactly what
+  // happened (when, how many tickets couldn't be checked, why it failed)
+  // instead of a blanket "synced" claim.
+  const [syncInfo, setSyncInfo] = useState({ at: null, failed: [], error: null, notConnected: false });
+  // Edit-save state: the save now waits for Jira (see PATCH in tickets.py)
+  // rather than optimistically showing success.
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
   // Tracks whether the FIRST sync (the one that runs automatically on
   // mount) has finished. Ticket status here is only as fresh as the last
   // sync — GET /api/tickets returns whatever was last written locally,
@@ -2709,8 +2750,15 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
   const syncWithJira = () => {
     setSyncState("syncing");
     fetch(`${API_BASE}/api/tickets/sync`, { method: "POST", credentials: "include" })
-      .then(res => res.json())
-      .then(data => {
+      .then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          // Previously any JSON response counted as success, so "no Jira
+          // connected" or a server error looked like a completed sync.
+          setSyncInfo({ at: null, failed: [], error: data.error || `Sync failed (${res.status})`, notConnected: data.code === "jira_not_connected" });
+          setSyncState("error");
+          return;
+        }
         if (Array.isArray(data.tickets)) {
           setTickets(data.tickets);
           setSelectedTicket(prev => {
@@ -2718,10 +2766,43 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
             return data.tickets.find(t => t.id === prev.id) || prev;
           });
         }
-        setSyncState("done");
+        const failed = Array.isArray(data.failed) ? data.failed : [];
+        setSyncInfo({ at: data.syncedAt || null, failed, error: null, notConnected: false });
+        setSyncState(failed.length > 0 ? "partial" : "done");
       })
-      .catch(() => setSyncState("error"))
+      .catch(() => {
+        setSyncInfo({ at: null, failed: [], error: "Couldn't reach the server.", notConnected: false });
+        setSyncState("error");
+      })
       .finally(() => setHasSyncedOnce(true));
+  };
+
+  // Saves a status/assignee edit. Nothing is shown as saved until the
+  // server confirms; for Jira-linked tickets the server only confirms after
+  // Jira itself accepted the status change.
+  const saveEdit = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/tickets/${encodeURIComponent(selectedTicket.id)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: editForm.status, assigned: editForm.assigned }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSaveError(data.error || `Couldn't save (${res.status}). Nothing was changed.`);
+        return;
+      }
+      setTickets(prev => prev.map(t => t.id === data.id ? { ...t, ...data } : t));
+      setSelectedTicket(prev => ({ ...prev, ...data }));
+      setEditing(false);
+    } catch {
+      setSaveError("Couldn't reach the server. Nothing was changed.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   useEffect(() => {
@@ -2753,8 +2834,26 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
             </button>
           </div>
           <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>
-            AI-generated — human approved — synced with Jira
-            {syncState === "error" && <span style={{ color: "#dc2626" }}> · Sync failed — check your Jira connection in Profile</span>}
+            AI-generated, human approved.
+            {" "}
+            {syncState === "syncing" && <span>Checking Jira…</span>}
+            {syncState === "done" && <span>Statuses last checked with Jira {formatSyncedAt(syncInfo.at) || "just now"}.</span>}
+            {syncState === "partial" && (
+              <span style={{ color: "#b45309" }}>
+                Couldn't check {syncInfo.failed.length} Jira-linked ticket{syncInfo.failed.length === 1 ? "" : "s"} ({syncInfo.failed.join(", ")}); their status may be out of date.
+              </span>
+            )}
+            {syncState === "error" && (
+              <span style={{ color: "#dc2626" }}>
+                {syncInfo.notConnected
+                  ? "Jira isn't connected, so statuses here are not being checked against Jira. Connect it in Profile."
+                  : `Couldn't check Jira: ${syncInfo.error}`}
+              </span>
+            )}
+            {syncState === "idle" && <span>Not yet checked with Jira.</span>}
+            {tickets.some(t => !t.jiraIssueKey) && syncState !== "syncing" && (
+              <span> {tickets.filter(t => !t.jiraIssueKey).length} ticket{tickets.filter(t => !t.jiraIssueKey).length === 1 ? " is" : "s are"} not in Jira (marked below).</span>
+            )}
           </div>
 
           {/* Filters */}
@@ -2805,7 +2904,10 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
                     background: selectedTicket?.id === t.id ? "#eff6ff" : "transparent", alignItems: "center" }}>
                   <div style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>{t.id}</div>
                   <div style={{ fontSize: 11, fontFamily: "monospace", color: "#6b7280" }}>{t.cve}</div>
-                  <div style={{ fontSize: 12, color: "#374151", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.title}</div>
+                  <div style={{ fontSize: 12, color: "#374151", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {!t.jiraIssueKey && <span title="This ticket exists only in this app. Changes here don't appear in Jira." style={{ fontSize: 10, fontWeight: 700, color: "#b45309", background: "#fef3c7", borderRadius: 20, padding: "1px 7px", marginRight: 6 }}>Not in Jira</span>}
+                    {t.title}
+                  </div>
                   <div><span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20, background: pc.bg, color: pc.color }}>{t.priority}</span></div>
                   <div><span style={{ fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 20, background: sc.bg, color: sc.color }}>{t.status}</span></div>
                   <div style={{ fontSize: 12, color: "#6b7280" }}>{t.assigned}</div>
@@ -2830,11 +2932,21 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
             <span style={{ fontSize: 11, color: "#6b7280", padding: "3px 0" }}>CVSS {selectedTicket.cvss}</span>
           </div>
 
-          {selectedTicket.jiraIssueKey && (
-            <a href={selectedTicket.jiraUrl || undefined} target="_blank" rel="noreferrer"
-              style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#2563eb", textDecoration: "none", marginBottom: 12 }}>
-              🔗 {selectedTicket.jiraIssueKey} in Jira
-            </a>
+          {selectedTicket.jiraIssueKey ? (
+            <div style={{ marginBottom: 12, fontSize: 12, color: "#6b7280", lineHeight: 1.5 }}>
+              <a href={selectedTicket.jiraUrl || undefined} target="_blank" rel="noreferrer"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: 600, color: "#2563eb", textDecoration: "none" }}>
+                🔗 {selectedTicket.jiraIssueKey} in Jira
+              </a>
+              <div>
+                {selectedTicket.jiraSyncedAt ? `Status last confirmed with Jira ${formatSyncedAt(selectedTicket.jiraSyncedAt)}.` : "Status not yet confirmed with Jira."}
+                {" "}Status changes here are sent to Jira. Assignee is kept in this app only.
+              </div>
+            </div>
+          ) : (
+            <div style={{ marginBottom: 12, fontSize: 12, color: "#92400e", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+              <strong>Not in Jira.</strong> This ticket exists only in this app, so nothing you change here will appear in Jira.
+            </div>
           )}
 
           {/* AI Analysis */}
@@ -2853,20 +2965,27 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
             ))}
           </div>
 
-          {/* Validation */}
+          {/* Sources — real links only; no claim that anything was verified */}
           <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Validation</div>
-            {["CVSS verified against NVD", "CVE record exists in MITRE", "Vendor advisory cross-referenced"].map(v => (
-              <div key={v} style={{ fontSize: 12, color: "#6b7280", marginBottom: 3, display: "flex", gap: 6, alignItems: "center" }}>
-                <span style={{ color: "#22c55e" }}>✓</span> {v}
-              </div>
-            ))}
+            <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Check the sources</div>
+            {(() => {
+              const links = evidenceLinks(selectedTicket.cve, null).records;
+              return links.length === 0 ? (
+                <div style={{ fontSize: 12, color: "#9ca3af" }}>No public CVE record to link to for this finding.</div>
+              ) : links.map(l => (
+                <a key={l.url} href={l.url} target="_blank" rel="noopener noreferrer"
+                  style={{ display: "block", fontSize: 12, color: "#2563eb", textDecoration: "none", marginBottom: 3 }}>
+                  {l.label} ↗
+                </a>
+              ));
+            })()}
+            <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 4 }}>The AI's explanation hasn't been checked against these automatically. Open them to confirm.</div>
           </div>
 
           {/* Confidence */}
           <div style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Confidence</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}><Term k="aiConfidence">AI confidence</Term> (estimate)</div>
               <div style={{ fontSize: 12, color: "#374151" }}>{selectedTicket.confidence}%</div>
             </div>
             <div style={{ height: 6, background: "#e5e7eb", borderRadius: 99 }}>
@@ -2879,7 +2998,7 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
             <div style={{ display: "flex", gap: 8 }}>
               {canEdit && (
                 <button
-                  onClick={() => { setEditing(true); setEditForm({ status: selectedTicket.status, assigned: selectedTicket.assigned }); }}
+                  onClick={() => { setSaveError(null); setEditing(true); setEditForm({ status: selectedTicket.status, assigned: selectedTicket.assigned }); }}
                   style={{ flex: 1, padding: "8px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
                   Edit
                 </button>
@@ -2909,28 +3028,21 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
                 <option>Infrastructure</option>
                 <option>Platform Engineering</option>
               </select>
+              {saveError && (
+                <div style={{ fontSize: 12, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>
+                  {saveError}
+                </div>
+              )}
               <div style={{ display: "flex", gap: 8 }}>
                 <button
-                  onClick={() => {
-                    const updated = { ...selectedTicket, ...editForm };
-                    setTickets(prev => prev.map(t => t.id === updated.id ? updated : t));
-                    setSelectedTicket(updated);
-                    setEditing(false);
-                    // Best-effort — the local update above already reflects
-                    // the change either way, this just makes it stick past
-                    // a refresh.
-                    fetch(`${API_BASE}/api/tickets/${encodeURIComponent(updated.id)}`, {
-                      method: "PATCH",
-                      credentials: "include",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ status: editForm.status, assigned: editForm.assigned }),
-                    }).catch(() => {});
-                  }}
-                  style={{ flex: 1, padding: "8px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
-                  Save
+                  onClick={saveEdit}
+                  disabled={saving}
+                  style={{ flex: 1, padding: "8px", borderRadius: 20, border: "none", background: "#2563eb", color: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 }}>
+                  {saving ? (selectedTicket.jiraIssueKey ? "Updating Jira…" : "Saving…") : "Save"}
                 </button>
                 <button
-                  onClick={() => setEditing(false)}
+                  onClick={() => { setEditing(false); setSaveError(null); }}
+                  disabled={saving}
                   style={{ flex: 1, padding: "8px", borderRadius: 20, border: "1px solid #e5e7eb", background: "#fff", fontSize: 13, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer", color: "#374151" }}>
                   Cancel
                 </button>

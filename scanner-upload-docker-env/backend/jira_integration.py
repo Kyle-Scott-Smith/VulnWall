@@ -166,6 +166,70 @@ def fetch_issue_status_category(record, issue_key):
         return None
 
 
+# App status -> Jira status *category* (the inverse of tickets.py's
+# _JIRA_CATEGORY_TO_STATUS). Category is used rather than a status name
+# because each Jira project can name/customise its own statuses.
+STATUS_TO_JIRA_CATEGORY = {
+    "Open": "new",
+    "In Progress": "indeterminate",
+    "Closed": "done",
+}
+
+
+def pick_transition(transitions, target_category):
+    """Given the list from GET /issue/<key>/transitions, returns the id of
+    a transition that lands the issue in target_category, or None if the
+    issue's workflow has no such move from its current status (Jira
+    workflows can restrict which statuses are reachable from where).
+    Pure function so it can be unit tested without calling Jira."""
+    for t in transitions or []:
+        to = (t or {}).get("to") or {}
+        category = ((to.get("statusCategory") or {}).get("key"))
+        if category == target_category and t.get("id"):
+            return t["id"]
+    return None
+
+
+def transition_issue_to_category(record, issue_key, target_category):
+    """Moves issue_key to a status in target_category ("new",
+    "indeterminate" or "done"). Returns (ok, error_message) — error_message
+    is a plain-English reason suitable for showing to the user, or None on
+    success. Used by tickets.py so a status change made in this app is
+    actually applied in Jira instead of only being saved locally."""
+    if not record or not issue_key:
+        return False, "This ticket isn't linked to a Jira issue."
+    base = f"https://api.atlassian.com/ex/jira/{record['cloud_id']}/rest/api/3/issue/{issue_key}"
+    headers = {"Authorization": f"Bearer {record['access_token']}", "Accept": "application/json"}
+    try:
+        current = fetch_issue_status_category(record, issue_key)
+        if current == target_category:
+            return True, None  # Jira already has it in the requested state
+
+        resp = requests.get(f"{base}/transitions", headers=headers, timeout=10)
+        if resp.status_code in (401, 403):
+            return False, "Jira rejected the request. Reconnect Jira in Profile and try again."
+        if resp.status_code == 404:
+            return False, f"{issue_key} no longer exists in Jira or you no longer have access to it."
+        if resp.status_code != 200:
+            return False, f"Jira returned an error ({resp.status_code}) while looking up available status changes."
+
+        transition_id = pick_transition(resp.json().get("transitions"), target_category)
+        if not transition_id:
+            return False, f"Jira's workflow for {issue_key} doesn't allow moving it to that status from its current one."
+
+        do = requests.post(
+            f"{base}/transitions",
+            json={"transition": {"id": transition_id}},
+            headers={**headers, "Content-Type": "application/json"},
+            timeout=10,
+        )
+        if do.status_code not in (200, 204):
+            return False, f"Jira refused the status change ({do.status_code})."
+        return True, None
+    except (requests.RequestException, ValueError):
+        return False, "Couldn't reach Jira. The change was not made."
+
+
 def _not_configured():
     if not CLIENT_ID or not CLIENT_SECRET:
         return jsonify({
