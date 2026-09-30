@@ -51,13 +51,18 @@ Claude available again alongside it.
   service that pulls the model automatically on `docker compose up` — see
   "One-time setup" below. The `backend` service gets
   `OLLAMA_HOST=http://ollama:11434` and waits on both.
-- **`.env.example`** — added `OLLAMA_MODEL` (defaults to `llama3.1`),
+- **`backend/.env.example`** — added `OLLAMA_MODEL` (set to `llama3.2:3b`;
+  the code's fallback if it's unset is `llama3.1`, which is *not* pulled —
+  so keep this line in your `.env`),
   `OLLAMA_TIMEOUT_SECONDS`, `AI_MAX_RETRIES`, `CHAT_MAX_CONTEXT_VULNS`.
   `OLLAMA_HOST` is set in `docker-compose.yml` directly since it's just
   the compose network's service name — only override it in `.env` if
   you're pointing at Ollama running somewhere else.
 
 ## Known issue we hit: "model 'llama3.1' not found" even after pulling it
+
+*(Historical — at the time the project used `llama3.1`; it now uses
+`llama3.2:3b`. The fix below still applies to any model name.)*
 
 `ollama pull llama3.1` registers the model on the Ollama server as
 **`llama3.1:latest`**, not bare `llama3.1`. Ollama's `/api/chat` endpoint
@@ -91,7 +96,7 @@ names above.
 ## One-time setup: pull a model
 
 `docker-compose.yml` now includes an `ollama-pull` service that pulls
-`llama3.1` automatically on `docker compose up` — the `backend` service
+`llama3.2:3b` automatically on `docker compose up` — the `backend` service
 won't start until it finishes, so there's no manual step to forget or get
 wrong. This only needs to happen once per machine; the model persists in
 the `ollama_models` volume across restarts (`ollama-pull` runs again on
@@ -102,7 +107,7 @@ If you'd rather pull manually (or need a different model — see below),
 that still works too:
 
 ```bash
-docker compose exec ollama ollama pull llama3.1
+docker compose exec ollama ollama pull llama3.2:3b
 ```
 
 **Changing the model**: `OLLAMA_MODEL` in `backend/.env` and the
@@ -115,14 +120,14 @@ need the two names to match *exactly* anyway — `resolve_model` matches
 tag, so just make sure whatever you set it to is something `ollama-pull`
 (or a manual pull) actually brings down.
 
-Smaller/faster options if `llama3.1` (8B) is too slow on CPU-only
-hardware: `llama3.2` (3B) or `phi3`. Larger/stronger if you have a GPU:
+The default `llama3.2:3b` (~2 GB) is chosen to run acceptably on CPU-only
+laptops. Larger/stronger if you have a GPU or more RAM: `llama3.1` (8B),
 `llama3.1:70b`, `mixtral`. Whatever you pick, structured-JSON reliability
 (needed for `/api/analyze`'s strict field contract) varies more between
 models than with Claude — if you see a lot of `ai_generated: false`
 (template fallback) in practice, that's usually the model failing the
 JSON schema check in `ai_analysis.py`, not a bug; try a larger model or
-loosen the retry count via `AI_MAX_RETRIES`.
+increase the retry count via `AI_MAX_RETRIES`.
 
 ## Verifying it's working
 
@@ -137,9 +142,9 @@ guessing:
 ```json
 {
   "ollama_host": "http://ollama:11434",
-  "requested_model": "llama3.1",
-  "resolved_model": "llama3.1:latest",
-  "available_models": ["llama3.1:latest"]
+  "requested_model": "llama3.2:3b",
+  "resolved_model": "llama3.2:3b",
+  "available_models": ["llama3.2:3b"]
 }
 ```
 

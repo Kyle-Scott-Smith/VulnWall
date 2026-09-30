@@ -6,7 +6,8 @@ built to be as isolated as possible so it's safe to commit and push:
 ## New files (self-contained, no edits needed elsewhere to remove them)
 
 - **`jira_integration.py`** — a Flask Blueprint containing *everything*
-  Jira-related: OAuth connect/callback routes, in-memory token storage,
+  Jira-related: OAuth connect/callback routes, token storage (the `jira_connections`
+  table in the shared SQLite DB),
   and the ticket-creation endpoint. No other backend file needs to know
   it exists beyond the two lines added to `scanner.py` below.
 - **`.env.example`** — documents every env var this feature reads.
@@ -15,7 +16,7 @@ built to be as isolated as possible so it's safe to commit and push:
 
 ## Changes to existing files (minimal, additive)
 
-**`scanner.py`** — 3 additions, nothing removed or restructured:
+**`scanner.py`** — four small additions, nothing removed or restructured:
 ```python
 from jira_integration import jira_bp
 ...
@@ -82,20 +83,12 @@ will fail with a 403 the first time a new `JIRA_DEFAULT_PROJECT_KEY` is used
 
 ## Setup
 
-1. Copy `.env.example` to `.env`, fill in your real `JIRA_CLIENT_ID` /
+1. Copy `backend/.env.example` to `backend/.env`, fill in your real `JIRA_CLIENT_ID` /
    `JIRA_CLIENT_SECRET` (from the Atlassian Developer Console app you
    already registered) and a real `JIRA_DEFAULT_PROJECT_KEY`.
-2. Make sure `.env` is in `.gitignore` (see below — it currently isn't
-   listed anywhere, so add it before committing).
-3. Wire `.env` into `docker-compose.yml`'s `backend` service, e.g.:
-   ```yaml
-   backend:
-     env_file:
-       - .env
-   ```
-   (Not added automatically here since it touches a shared file outside
-   this feature's own files — add it yourself, or ask and it can be
-   done as a separate, clearly-labeled change.)
+2. Make sure `backend/.env` is in the repository-root `.gitignore` (see below).
+3. Nothing to wire up: `docker-compose.yml`'s `backend` service already
+   loads it via `env_file: - ./backend/.env`.
 4. Add `http://localhost:5000/api/jira/callback` to the app's Callback
    URLs list in the Developer Console (Authorization tab) if it isn't
    already there.
@@ -105,18 +98,18 @@ will fail with a 403 the first time a new `JIRA_DEFAULT_PROJECT_KEY` is used
 ## Important: add this to `.gitignore` before committing
 
 ```
-.env
+backend/.env
 ```
 
-`.env.example` is safe to commit (no real values). `.env` itself must
+`backend/.env.example` is safe to commit (no real values). `backend/.env` itself must
 never be committed — it will contain your real client secret.
 
 ## What's intentionally NOT included (by design, for isolation/safety)
 
-- **Token storage is in-memory** (`_TOKENS` dict in `jira_integration.py`),
-  keyed by Flask session — fine for a single-demo-user setup, gone on
-  restart, not encrypted. Flagged clearly in that file's docstring.
-  Swap for a real database before any multi-user/production use.
+- **Tokens are stored unencrypted** in the `jira_connections` table
+  (one row per app user, keyed by `users.id`). This replaced the original
+  in-memory dict, so connections now survive a backend restart. Encrypt
+  them at rest (or move to a secrets store) before production use.
 - **No token refresh logic** — access tokens expire in ~1 hour. The
   demo flow doesn't auto-refresh yet; reconnecting via the Profile page
   fixes it.
