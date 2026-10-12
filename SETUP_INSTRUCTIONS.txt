@@ -1,11 +1,18 @@
 ========================================================
-SECURITY DASHBOARD DEMO - SETUP INSTRUCTIONS (WINDOWS)
+VULNERABILITY SCANNER DEMO - SETUP INSTRUCTIONS (WINDOWS)
 ========================================================
 
 This guide gets the demo app running on a Windows machine using
 Docker. Follow the steps in order. Most people will only need
 Part 1 and Part 3.
 
+What you need:
+   - Windows 10/11.
+   - About 5 GB of free disk space (Docker, the app, and a
+     ~2 GB AI model that downloads on first run).
+   - 8 GB of RAM or more is recommended. The built-in AI model
+     runs on your own computer.
+   - An internet connection for the first run.
 
 --------------------------------------------------------
 PART 1: INSTALL DOCKER DESKTOP
@@ -14,6 +21,7 @@ PART 1: INSTALL DOCKER DESKTOP
 1. Open PowerShell (does not need to be Administrator).
 
 2. Run:
+
    winget install Docker.DockerDesktop
 
 3. Once install finishes, restart your computer.
@@ -29,7 +37,6 @@ PART 1: INSTALL DOCKER DESKTOP
 
 If Docker Desktop opens with no errors, skip to PART 3.
 
-
 --------------------------------------------------------
 PART 2: FIX "VIRTUALIZATION NOT DETECTED" ERROR
 --------------------------------------------------------
@@ -38,6 +45,7 @@ If Docker Desktop shows an error like "Virtualization support not
 detected" or "WSL2 is not installed," do the following:
 
 STEP A - Check if virtualization is on:
+
    1. Open Task Manager (Ctrl+Shift+Esc).
    2. Click the "Performance" tab, then "CPU."
    3. Look at the bottom right for "Virtualization."
@@ -45,6 +53,7 @@ STEP A - Check if virtualization is on:
       - If it says "Disabled" -> continue to STEP B.
 
 STEP B - Enable virtualization in BIOS:
+
    1. Restart your computer.
    2. While it boots, repeatedly press the BIOS/UEFI setup key.
       This is usually F2, F10, Delete, or Esc (check your
@@ -61,12 +70,15 @@ STEP B - Enable virtualization in BIOS:
    IT and ask them to enable virtualization (Intel VT-x/AMD-V).
 
 STEP C - Enable required Windows features:
+
    1. Open PowerShell AS ADMINISTRATOR (right-click PowerShell,
       choose "Run as administrator").
    2. Run these commands one at a time:
 
       dism.exe /online /enable-feature /featurename:Microsoft-Hyper-V /all /norestart
+
       dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+
       dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
 
    3. Restart the computer:
@@ -74,6 +86,7 @@ STEP C - Enable required Windows features:
       shutdown /r /t 0
 
 STEP D - Update and set WSL2 as default:
+
    1. After restarting, open PowerShell AS ADMINISTRATOR again.
    2. Run:
 
@@ -81,10 +94,10 @@ STEP D - Update and set WSL2 as default:
       wsl --set-default-version 2
 
 STEP E - Launch Docker Desktop again:
+
    Open Docker Desktop from the Start menu. It should now start
    without errors. If it still fails, contact whoever set up this
    demo for help, or your IT admin.
-
 
 --------------------------------------------------------
 PART 3: RUN THE APP
@@ -93,40 +106,102 @@ PART 3: RUN THE APP
 1. Make sure Docker Desktop is open and shows "running" in the
    system tray (bottom-right of your screen, whale icon).
 
-2. Unzip the "docker-demo.zip" file you were given, anywhere you
-   like (e.g. Downloads or Desktop).
+2. Unzip the project zip file you were given, anywhere you like
+   (e.g. Downloads or Desktop).
 
 3. Open PowerShell (does not need to be Administrator).
 
-4. Navigate into the unzipped folder. For example, if you
-   unzipped it to your Downloads folder:
+4. Navigate into the unzipped folder - the one that contains the
+   file "docker-compose.yml". For example, if you unzipped it to
+   your Downloads folder:
 
       cd C:\Users\YOUR_USERNAME\Downloads\docker-demo\docker-demo
 
    (Replace YOUR_USERNAME with your actual Windows username, and
-   adjust the path if you unzipped it somewhere else.)
+   adjust the path to match where you unzipped it. Tip: type
+   "dir" - you should see docker-compose.yml in the list.)
 
-5. Run:
+5. Create your settings file. This step is REQUIRED - the app
+   will not start without it. Run:
+
+      Copy-Item backend\.env.example backend\.env
+
+6. Give the app a secret key for sign-in sessions. Run this to
+   generate one:
+
+      -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+
+   Copy the long text it prints. Then open the settings file:
+
+      notepad backend\.env
+
+   Find the line that says FLASK_SECRET_KEY= and paste the text
+   straight after the equals sign, with no spaces, like:
+
+      FLASK_SECRET_KEY=3fa9...your-long-text...
+
+   Save the file and close Notepad. Leave every other line as it
+   is. Optional features (Jira, Google sign-in, Tenable) stay
+   switched off until their keys are filled in.
+
+7. Start the app:
 
       docker compose up --build
 
-6. Wait for the terminal to show a message that the server is
-   ready (this may take a minute or two the first time).
+8. WAIT. The first run takes a while (often 5-15 minutes):
+   Docker builds the app and then downloads a ~2 GB AI model.
+   The app does not start until the download is finished. You
+   will see progress messages in the PowerShell window. Later
+   starts take under a minute.
 
-7. Open a web browser and go to:
+   It is ready when the messages stop scrolling and you see the
+   backend report that it is running on port 5000.
+
+9. Open a web browser and go to:
 
       http://localhost:5173
 
-8. The app should now be running in your browser.
+10. Click to create an account. The FIRST account created becomes
+    the Admin; accounts created after that start as Security
+    Analysts (an Admin can change roles later). Passwords need
+    at least 8 characters including a lowercase letter, an
+    uppercase letter, a number and a symbol.
 
-9. To stop the app, go back to the PowerShell window and press
-   Ctrl+C. To start it again later, run:
+    After signing up you will be asked a few questions about your
+    organisation. These are used to rank vulnerabilities by how
+    much they matter to YOUR business. A short guided tour then
+    starts (you can skip it).
+
+11. To stop the app, go back to the PowerShell window and press
+    Ctrl+C. To start it again later, run:
 
       docker compose up
 
-   (you don't need "--build" again unless you were told
-   dependencies changed)
+    (you don't need "--build" again unless you were told
+    dependencies changed)
 
+Other addresses you may find useful once it is running:
+
+   http://localhost:8025   - "Mailpit": a fake inbox. Any emails
+                             the app sends (scan alerts,
+                             two-factor codes) appear here
+                             instead of going to real addresses.
+   http://localhost:5000/api/health        - should say "ok"
+   http://localhost:5000/api/ollama-status - shows whether the AI
+                             model is installed and ready
+
+Your accounts, tickets and scan history are saved on your
+computer in backend\data\auth.db and are kept between runs.
+
+--------------------------------------------------------
+TRY IT OUT
+--------------------------------------------------------
+
+Sign in, open "Upload Scan", and either drag in a scan report
+(.json from Trivy or Tenable, up to 20 MB) or choose "Run a live
+scan". The app then analyses each finding with the AI model,
+which can take a while on a computer without a graphics card.
+The "Next" button stays disabled ("Analyzing...") until it is done.
 
 --------------------------------------------------------
 TROUBLESHOOTING
@@ -134,20 +209,73 @@ TROUBLESHOOTING
 
 ERROR: "unable to get image ... failed to connect to the docker
 API ... The system cannot find the file specified"
+
    -> Docker Desktop isn't running. Open it from the Start menu
       and wait for it to say "running" before trying again.
 
+ERROR: "env file ... backend\.env not found" (or similar)
+
+   -> You skipped step 5. Run, from the folder containing
+      docker-compose.yml:
+
+         Copy-Item backend\.env.example backend\.env
+
 ERROR: "port is already allocated" or "port 5173 already in use"
-   -> Something else on your machine is using that port. Close
-      other Docker containers or apps and try again, or contact
-      whoever set this up to change the port.
+
+   -> Something else on your machine is using one of the ports
+      this app needs: 5173 (app), 5000 (backend), 8025 and 1025
+      (Mailpit), 11434 (AI server). Close other Docker
+      containers or programs that use that port and try again,
+      or contact whoever set this up to change the port.
 
 Browser shows "This site can't be reached" at localhost:5173
+
    -> Give it another 10-20 seconds after running the command,
-      then refresh. Check the PowerShell window for error
-      messages if it still doesn't load.
+      then refresh. On the very first run the app is not
+      available until the AI model has finished downloading -
+      check the PowerShell window for progress or error messages.
+
+The first start seems stuck / never finishes
+
+   -> It is probably still downloading the AI model (~2 GB). To
+      check, open a second PowerShell window in the same folder
+      and run:
+
+         docker compose logs ollama-pull
+
+      If it shows an error, check your internet connection and
+      run "docker compose up" again.
+
+You keep getting signed out, or sign-in fails with an error
+
+   -> Check that FLASK_SECRET_KEY in backend\.env has a value
+      (step 6). Then restart the app: press Ctrl+C and run
+      "docker compose up" again.
+
+Findings show generic text or "Automated analysis unavailable",
+or the AI seems broken
+
+   -> Open http://localhost:5000/api/ollama-status. If it shows
+      an error, the AI model isn't installed or the AI server
+      isn't running. Check "docker compose logs ollama-pull".
+      Small models sometimes give answers the app can't use; the
+      app then falls back to a simple built-in summary.
+
+The computer is slow or Docker runs out of memory
+
+   -> The AI model needs several GB of memory. Close other
+      programs, and in Docker Desktop (Settings > Resources)
+      allow it more memory if you can.
+
+I forgot my password / want to start completely fresh
+
+   -> There is no password reset. Stop the app (Ctrl+C), delete
+      the file backend\data\auth.db, and start again. WARNING:
+      this erases ALL accounts, scan history and tickets. The
+      next account you create becomes the Admin.
 
 Still stuck?
+
    -> Take a screenshot of the error and send it to whoever set
       up this demo for you.
 
