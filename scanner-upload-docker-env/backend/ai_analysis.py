@@ -29,6 +29,22 @@ present, it's:
      when Ollama is unreachable and analyze() falls back to the template
      result below.
 
+Recent incidents (ASD ACSC threat reporting): every analyze() call also
+looks the finding's CVE up against the Australian Signals Directorate's
+Australian Cyber Security Centre Alerts/Advisories feeds (threat_intel.py).
+A match is folded in two independent ways, same "deterministic score +
+LLM prompt block" pattern as business context above:
+  1. compute_business_priority_score() multiplies the score up further for
+     an ACSC match — more for an Alert (ACSC's highest-urgency
+     designation) than an Advisory (guidance, not confirmed active
+     exploitation) — so these findings sort to the top even if Ollama is
+     unreachable.
+  2. The prompt gets a "Recent ASD ACSC reporting" block, and the system
+     prompt's priority_tier rule has a hard-floor exception: a CVE with an
+     ACSC Alert must come back P1/P2 regardless of CVSS or business
+     context. An Advisory-only match is a strong input to the normal
+     "at most one tier" adjustment, not a hard floor.
+
 Previously called the Claude API — swapped to a local Ollama model. The
 class does the same job so scanner.py's usage didn't need to change beyond
 the import name; see ollama_client.py for the actual HTTP call.
@@ -38,6 +54,7 @@ import logging
 import os
 
 from ollama_client import chat as ollama_chat, OllamaError
+import threat_intel
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +98,19 @@ Rules:
     clearly warrants it — e.g. bump up for a life-safety or internet-facing system handling regulated data, or
     ease down for an internal, air-gapped system with no sensitive data. Explain that adjustment in
     "business_impact", not "why".
+    EXCEPTION: if a "Recent ASD ACSC reporting" section is present AND it includes at least one [ALERT] item,
+    priority_tier MUST be "P1" or "P2" regardless of CVSS or business context — an ACSC Alert is their
+    highest-urgency designation and overrides the normal anchoring rule above. If the section is present but
+    contains ONLY [ADVISORY] items (no [ALERT]), do NOT treat that as a hard floor — instead treat it as a strong
+    input to the normal "at most one tier" business-context adjustment above, not a forced P1/P2, since an
+    Advisory is guidance, not confirmation of active exploitation. Either way, reference the ACSC reporting in
+    "why" (briefly), and explicitly name whether it was an Alert or an Advisory — don't blur the distinction.
 """
 
 _SIMPLIFIED_SYSTEM_PROMPT = """You are a cybersecurity analyst. Only use the data given.
 Respond ONLY with JSON: {"why": "technical explanation of the vulnerability", "business_impact": "2-4 sentences on what this specifically means for this organisation, naming its sector/compliance/data/exposure details if a Business context section was given, else empty string", "fixes": ["...", "..."], "confidence": 0-100, "priority_tier": "P1|P2|P3|P4"}
 Never name a specific fixed/patched version number in "fixes" - you were not given one, so say "upgrade to the vendor's current patched release and confirm the version against the advisory" instead of guessing a number.
+If a "Recent ASD ACSC reporting" section with an [ALERT] item is present, priority_tier must be P1 or P2. An [ADVISORY]-only section is not a forced P1/P2.
 No other text."""
 
 _REQUIRED_FIELDS = {"why": str, "business_impact": str, "fixes": list, "confidence": int, "priority_tier": str}
@@ -118,6 +143,25 @@ _CONCERN_DOUBLES_COMPLIANCE = "legal_regulatory"
 _CONCERN_DOUBLES_SENSITIVITY = "customer_trust"
 _CONCERN_DOUBLES_REVENUE = "revenue_loss"
 _CONCERN_DOUBLES_TIER = {"physical_safety", "operational_downtime"}
+
+# ACSC (recent-incidents) score multipliers — applied on top of everything
+# else in compute_business_priority_score. An Alert is ACSC's highest-
+# urgency designation (active/imminent exploitation), so it pushes the
+# score up considerably further than an Advisory-only match (guidance,
+# not confirmed active exploitation).
+ACSC_ALERT_SCORE_MULTIPLIER = float(os.getenv("ACSC_ALERT_SCORE_MULTIPLIER", "2.0"))
+ACSC_ADVISORY_SCORE_MULTIPLIER = float(os.getenv("ACSC_ADVISORY_SCORE_MULTIPLIER", "1.3"))
+
+
+def _acsc_signature(acsc_entries: list | None):
+    """Cache-key helper mirroring _business_context_signature below — so a
+    cached analysis result is invalidated if the ACSC feeds pick up a new
+    Alert/Advisory for this CVE between runs, same reasoning as the
+    business-context signature (don't hand out stale why/fixes/priority_tier
+    text once the grounding data it was built from has changed)."""
+    if not acsc_entries:
+        return None
+    return tuple(sorted((e.get("source"), e.get("link", "")) for e in acsc_entries))
 
 
 def _business_context_signature(business_context: dict | None):
@@ -181,7 +225,9 @@ def _business_context_prompt_block(business_context: dict) -> str:
     return "\n".join(lines)
 
 
-def compute_business_priority_score(vuln: dict, business_context: dict | None) -> float:
+def compute_business_priority_score(
+    vuln: dict, business_context: dict | None, acsc_entries: list | None = None
+) -> float:
     """Deterministic score used to ORDER findings by business importance,
     not just CVE/CVSS score. Computed independently of the LLM so ranking
     stays meaningful even in the ai_generated=False template-fallback path.
@@ -189,6 +235,12 @@ def compute_business_priority_score(vuln: dict, business_context: dict | None) -
     Higher = more important to remediate soon. With no business context
     (survey not completed) this collapses to a straightforward severity/
     CVSS score, so ordering degrades gracefully to today's CVSS-only sort.
+
+    `acsc_entries` (optional, defaults to None for backward compatibility
+    with existing 2-arg call sites/tests) is the list from
+    threat_intel.get_acsc_entries() for this finding's CVE — an ACSC Alert
+    or Advisory match multiplies the final score, applied after everything
+    else below, independent of whether business_context was provided.
     """
     cvss = vuln.get("cvss")
     base = float(cvss) if isinstance(cvss, (int, float)) else SEVERITY_BASE_SCORE.get(
@@ -196,7 +248,15 @@ def compute_business_priority_score(vuln: dict, business_context: dict | None) -
     )
 
     if not business_context:
-        return round(base, 2)
+        score = base
+        if acsc_entries:
+            multiplier = (
+                ACSC_ALERT_SCORE_MULTIPLIER
+                if threat_intel.has_alert(acsc_entries)
+                else ACSC_ADVISORY_SCORE_MULTIPLIER
+            )
+            score *= multiplier
+        return round(score, 2)
 
     top_concern = business_context.get("topConcern")
     tier_multiplier = _TIER_MULTIPLIER.get(business_context.get("criticalityTier"), 1.0)
@@ -254,6 +314,15 @@ def compute_business_priority_score(vuln: dict, business_context: dict | None) -
         exposure_bonus *= 0.5
 
     score *= (1 + exposure_bonus)
+
+    if acsc_entries:
+        multiplier = (
+            ACSC_ALERT_SCORE_MULTIPLIER
+            if threat_intel.has_alert(acsc_entries)
+            else ACSC_ADVISORY_SCORE_MULTIPLIER
+        )
+        score *= multiplier
+
     return round(score, 2)
 
 
@@ -308,12 +377,16 @@ class OllamaVulnerabilityAnalyzer:
         self.model = model
         self._cache = {}
 
-    def _build_user_prompt(self, vuln: dict, business_context: dict | None = None) -> str:
+    def _build_user_prompt(
+        self, vuln: dict, business_context: dict | None = None, acsc_entries: list | None = None
+    ) -> str:
         """Grounded context only — CVE facts, no real hostnames (asset field
         here is already whatever the scanner's parse() produced, which for
         Trivy uploads is the scan target string, not a live hostname).
-        Business context (from the sign-up survey), when available, is
-        appended as its own clearly-labelled block."""
+        ACSC reporting (about the vulnerability/threat itself, not
+        org-specific) goes right after the CVE facts; business context
+        (from the sign-up survey, org-specific) is appended after that as
+        its own clearly-labelled block."""
         lines = [
             f"CVE ID: {vuln.get('cve') or 'N/A (no CVE mapped, use title/description)'}",
             f"Title: {vuln.get('title', '')}",
@@ -324,6 +397,8 @@ class OllamaVulnerabilityAnalyzer:
         if vuln.get("package"):
             lines.append(f"Affected package: {vuln['package']} (installed: {vuln.get('installedVersion', 'unknown')})")
         prompt = "\n".join(lines)
+        if acsc_entries:
+            prompt += threat_intel.format_acsc_for_prompt(acsc_entries)
         if business_context:
             prompt += "\n" + _business_context_prompt_block(business_context)
         return prompt
@@ -375,18 +450,30 @@ class OllamaVulnerabilityAnalyzer:
         get_business_context() for the signed-in user, or None if they
         haven't completed that survey (or aren't signed in) — in which case
         this behaves exactly as before, CVSS/severity only.
+
+        Recent-incidents data (ASD ACSC Alerts/Advisories, threat_intel.py)
+        is looked up internally here, per-CVE, rather than being threaded
+        in from scanner.py — it's a property of the CVE itself, not the
+        session, so there's nothing session-scoped for the caller to pass.
+        A feed outage just means get_acsc_entries() returns [] (see
+        threat_intel.py's own graceful-degradation handling), so this never
+        raises on account of ACSC being unreachable.
         """
         cve_or_title = vuln.get("cve") or vuln.get("title")
-        cache_key = (cve_or_title, _business_context_signature(business_context)) if cve_or_title else None
+        acsc_entries = threat_intel.get_acsc_entries(vuln.get("cve"))
+        cache_key = (
+            (cve_or_title, _business_context_signature(business_context), _acsc_signature(acsc_entries))
+            if cve_or_title else None
+        )
         # business_priority_score doesn't depend on the LLM call at all, so
         # compute it fresh every time (cheap) rather than trusting a cached
         # value from a differently-scored vuln under the same cache key.
-        business_priority_score = compute_business_priority_score(vuln, business_context)
+        business_priority_score = compute_business_priority_score(vuln, business_context, acsc_entries)
 
         if cache_key and cache_key in self._cache:
             return {**self._cache[cache_key], "business_priority_score": business_priority_score, "from_cache": True}
 
-        user_prompt = self._build_user_prompt(vuln, business_context)
+        user_prompt = self._build_user_prompt(vuln, business_context, acsc_entries)
         parsed = None
 
         for attempt in range(MAX_RETRIES + 1):
@@ -400,8 +487,13 @@ class OllamaVulnerabilityAnalyzer:
 
         if parsed is None:
             logger.warning("LLM analysis failed for %s — using template fallback", cve_or_title)
+            acsc_alert = threat_intel.has_alert(acsc_entries)
+            fallback_why = vuln.get("description") or "Automated analysis unavailable for this finding."
+            if acsc_entries:
+                label = "an ACSC Alert" if acsc_alert else "an ACSC Advisory"
+                fallback_why = f"Referenced by {label} from the Australian Cyber Security Centre. {fallback_why}"
             result = {
-                "why": vuln.get("description") or "Automated analysis unavailable for this finding.",
+                "why": fallback_why,
                 "business_impact": _template_business_impact(business_context, vuln.get("severity")),
                 "fixes": [
                     f"Upgrade {vuln['package']} beyond {vuln.get('installedVersion', 'the installed version')}"
@@ -409,7 +501,11 @@ class OllamaVulnerabilityAnalyzer:
                     "Manual review required — AI analysis failed after retries.",
                 ],
                 "confidence": 30,
-                "priority_tier": self._severity_to_tier(vuln.get("severity", "")),
+                # Mirrors the LLM prompt's hard floor: an ACSC Alert forces
+                # P1 even in the deterministic fallback path, since this is
+                # a known fact that shouldn't disappear just because Ollama
+                # failed.
+                "priority_tier": "P1" if acsc_alert else self._severity_to_tier(vuln.get("severity", "")),
                 "ai_generated": False,
                 "from_cache": False,
                 "business_priority_score": business_priority_score,

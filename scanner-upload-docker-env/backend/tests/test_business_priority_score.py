@@ -6,7 +6,13 @@ can be exhaustively table-tested here rather than only spot-checked by hand.
 """
 import pytest
 
-from ai_analysis import SEVERITY_BASE_SCORE, _TIER_MULTIPLIER, compute_business_priority_score
+from ai_analysis import (
+    ACSC_ADVISORY_SCORE_MULTIPLIER,
+    ACSC_ALERT_SCORE_MULTIPLIER,
+    SEVERITY_BASE_SCORE,
+    _TIER_MULTIPLIER,
+    compute_business_priority_score,
+)
 
 
 def _ctx(**overrides):
@@ -170,3 +176,48 @@ def test_severity_fallback_still_applies_business_context_when_cvss_missing():
     ctx = _ctx(criticalityTier=1)
     expected = round(SEVERITY_BASE_SCORE["High"] * _TIER_MULTIPLIER[1], 2)
     assert compute_business_priority_score(vuln, ctx) == expected
+
+
+# ---------------------------------------------------------------------------
+# ACSC (recent-incidents) multiplier — optional 3rd param, backward compatible
+# ---------------------------------------------------------------------------
+
+def test_acsc_entries_defaults_to_none_and_is_backward_compatible():
+    # Every existing 2-arg call site/test above must keep working unchanged.
+    assert compute_business_priority_score({"cvss": 7.2}, None) == 7.2
+
+
+def test_no_acsc_entries_leaves_score_unchanged():
+    vuln = {"cvss": 6.0}
+    assert compute_business_priority_score(vuln, None, []) == 6.0
+    assert compute_business_priority_score(vuln, None, None) == 6.0
+
+
+def test_acsc_alert_multiplier_applied_with_no_business_context():
+    vuln = {"cvss": 6.0}
+    entries = [{"source": "alert", "link": "https://a"}]
+    expected = round(6.0 * ACSC_ALERT_SCORE_MULTIPLIER, 2)
+    assert compute_business_priority_score(vuln, None, entries) == expected
+
+
+def test_acsc_advisory_only_multiplier_applied_with_no_business_context():
+    vuln = {"cvss": 6.0}
+    entries = [{"source": "advisory", "link": "https://a"}]
+    expected = round(6.0 * ACSC_ADVISORY_SCORE_MULTIPLIER, 2)
+    assert compute_business_priority_score(vuln, None, entries) == expected
+
+
+def test_acsc_alert_outweighs_advisory_only():
+    vuln = {"cvss": 6.0}
+    alert_score = compute_business_priority_score(vuln, None, [{"source": "alert"}])
+    advisory_score = compute_business_priority_score(vuln, None, [{"source": "advisory"}])
+    assert alert_score > advisory_score
+
+
+def test_acsc_multiplier_stacks_on_top_of_business_context():
+    vuln = {"cvss": 8.0}
+    ctx = _ctx(criticalityTier=1, internetFacing="public")
+    without_acsc = compute_business_priority_score(vuln, ctx)
+    with_acsc = compute_business_priority_score(vuln, ctx, [{"source": "alert"}])
+    assert with_acsc == round(without_acsc * ACSC_ALERT_SCORE_MULTIPLIER, 2)
+    assert with_acsc > without_acsc
