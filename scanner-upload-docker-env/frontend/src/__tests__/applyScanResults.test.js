@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { applyScanResults, validationReasons, cveDetails, vulnRows, allRisks, validationRows, lastVulnerabilities, lastScanMeta } from "../App.jsx";
 
 describe("applyScanResults", () => {
+
   it("defaults missing fields (severity, cvss, asset)", () => {
     applyScanResults([{ cve: "CVE-2024-0001" }]);
     expect(vulnRows).toHaveLength(1);
@@ -150,7 +151,6 @@ describe("applyScanResults", () => {
   it("sets lastScanMeta when meta is passed, and leaves it alone when meta is omitted", () => {
     applyScanResults([{ cve: "CVE-2024-0040" }], { scanner: "trivy", source: "upload", target: "image:latest" });
     expect(lastScanMeta).toEqual({ scanner: "trivy", source: "upload", target: "image:latest" });
-
     // Second call (e.g. the AI-analysis re-apply) omits meta — should not wipe it out.
     applyScanResults([{ cve: "CVE-2024-0040", ai_generated: true }]);
     expect(lastScanMeta).toEqual({ scanner: "trivy", source: "upload", target: "image:latest" });
@@ -158,17 +158,147 @@ describe("applyScanResults", () => {
 });
 
 describe("validationReasons", () => {
+
   it("reports every missing-data reason before AI has run", () => {
     expect(validationReasons({})).toEqual(["The scanner gave no CVSS score.", "The scanner gave no description."]);
   });
+
   it("flags a template fallback", () => {
     expect(validationReasons({ ai_generated: false })[0]).toContain("generic template");
   });
+
   it("does not flag a real AI result at or above the threshold", () => {
     expect(validationReasons({ ai_generated: true, confidence: 60 })).toEqual([]);
     expect(validationReasons({ ai_generated: true })).toEqual([]);
   });
+
   it("can give both a template and low-confidence reason", () => {
     expect(validationReasons({ ai_generated: false, confidence: 10 })).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Added coverage
+// ---------------------------------------------------------------------------
+describe("applyScanResults — added edge cases", () => {
+  it("uses the AI confidence verbatim when present", () => {
+    applyScanResults([{ cve: "CVE-2024-5002", ai_generated: true, why: "w", fixes: ["f"], confidence: 88 }]);
+    expect(cveDetails["CVE-2024-5002"].confidence).toBe(88);
+  });
+
+  it("keeps a real confidence of 0 — zero is an answer, not 'missing' — and flags it as low", () => {
+    applyScanResults([{ cve: "CVE-2024-5015", ai_generated: true, why: "w", fixes: ["f"], confidence: 0 }]);
+    expect(cveDetails["CVE-2024-5015"].confidence).toBe(0);
+    expect(validationRows[0].status).toBe("Needs Review");
+    expect(validationRows[0].reasons[0]).toContain("0%");
+  });
+
+  it("treats a non-numeric AI confidence as missing instead of passing it through", () => {
+    applyScanResults([
+      { cve: "CVE-2024-5016", ai_generated: true, confidence: "90" },
+      { cve: "CVE-2024-5017", ai_generated: true, confidence: NaN },
+    ]);
+    expect(cveDetails["CVE-2024-5016"].confidence).toBeNull();
+    expect(cveDetails["CVE-2024-5017"].confidence).toBeNull();
+  });
+
+  it("explains a missing AI 'why' instead of showing nothing", () => {
+    applyScanResults([{ cve: "CVE-2024-5003", ai_generated: true }]);
+    expect(cveDetails["CVE-2024-5003"].why).toMatch(/No explanation/);
+    expect(cveDetails["CVE-2024-5003"].businessImpact).toBe("");
+  });
+
+  it("exposes business impact, tier and the aiGenerated flag from the AI result", () => {
+    applyScanResults([{ cve: "CVE-2024-5004", ai_generated: true, why: "w", business_impact: "Patient data", fixes: ["f"], priority_tier: "P1" }]);
+    expect(cveDetails["CVE-2024-5004"]).toMatchObject({ businessImpact: "Patient data", priorityTier: "P1", aiGenerated: true });
+  });
+
+  it("reports aiGenerated false and no tier before analysis has run", () => {
+    applyScanResults([{ cve: "CVE-2024-5005" }]);
+    expect(cveDetails["CVE-2024-5005"]).toMatchObject({ aiGenerated: false, priorityTier: null });
+  });
+
+  it("builds heuristic fixes from the package and installed version", () => {
+    applyScanResults([{ cve: "CVE-2024-5006", package: "openssl", installedVersion: "3.0.1" }]);
+    const fixes = cveDetails["CVE-2024-5006"].fixes;
+    expect(fixes[0]).toBe("Upgrade openssl beyond the installed version (3.0.1)");
+    expect(fixes).toHaveLength(3);
+  });
+
+  it("builds a shorter heuristic fix when only the package is known", () => {
+    applyScanResults([{ cve: "CVE-2024-5007", package: "zlib" }]);
+    expect(cveDetails["CVE-2024-5007"].fixes[0]).toBe("Upgrade zlib to a patched version");
+  });
+
+  it("still gives two generic fixes when no package is known", () => {
+    applyScanResults([{ cve: "CVE-2024-5008" }]);
+    expect(cveDetails["CVE-2024-5008"].fixes).toHaveLength(2);
+  });
+
+  it("has no confidence before analysis, however complete the scanner data is", () => {
+    applyScanResults([
+      { cve: "CVE-2024-5009", cvss: 7, description: "d" },
+      { cve: "CVE-2024-5010", cvss: 7 },
+      { cve: "CVE-2024-5011", description: "d" },
+    ]);
+    expect([cveDetails["CVE-2024-5009"].confidence, cveDetails["CVE-2024-5010"].confidence, cveDetails["CVE-2024-5011"].confidence])
+      .toEqual([null, null, null]);
+  });
+
+  it("marks a fully described pre-analysis finding 'No flags' with no reasons", () => {
+    applyScanResults([{ cve: "CVE-2024-5012", cvss: 5, description: "d", title: "t" }]);
+    expect(validationRows[0]).toMatchObject({ id: "CVE-2024-5012", status: "No flags", reasons: [], desc: "t" });
+  });
+
+  it("marks a template-fallback AI result (ai_generated false) Needs Review", () => {
+    applyScanResults([{ cve: "CVE-2024-5013", ai_generated: false, confidence: 99 }]);
+    expect(validationRows[0].status).toBe("Needs Review");
+  });
+
+  it("raises no flag for an AI result that carries no confidence (a missing one is not 'low')", () => {
+    applyScanResults([{ cve: "CVE-2024-5014", ai_generated: true }]);
+    expect(validationRows[0]).toMatchObject({ status: "No flags", reasons: [] });
+  });
+
+  it("clears the flag at exactly 60% confidence but not at 59%", () => {
+    applyScanResults([{ cve: "A", ai_generated: true, confidence: 60 }, { cve: "B", ai_generated: true, confidence: 59 }]);
+    expect(validationRows.map(r => r.status)).toEqual(["No flags", "Needs Review"]);
+  });
+
+  it("keeps references as an array or string, and drops anything else", () => {
+    applyScanResults([
+      { cve: "R1", references: ["https://a.example"] },
+      { cve: "R2", references: "https://b.example https://c.example" },
+      { cve: "R3", references: 42 },
+      { cve: "R4" },
+    ]);
+    expect(cveDetails.R1.references).toEqual(["https://a.example"]);
+    expect(cveDetails.R2.references).toBe("https://b.example https://c.example");
+    expect(cveDetails.R3.references).toEqual([]);
+    expect(cveDetails.R4.references).toEqual([]);
+  });
+
+  it("replaces the previous scan's rows entirely", () => {
+    applyScanResults([{ cve: "OLD-1" }, { cve: "OLD-2" }]);
+    applyScanResults([{ cve: "NEW-1" }]);
+    expect(vulnRows.map(r => r.id)).toEqual(["NEW-1"]);
+    expect(Object.keys(cveDetails)).toEqual(["NEW-1"]);
+    expect(allRisks).toHaveLength(1);
+    expect(validationRows).toHaveLength(1);
+  });
+
+  it("an empty list clears every derived structure", () => {
+    applyScanResults([{ cve: "X" }]);
+    applyScanResults([]);
+    expect(vulnRows).toEqual([]);
+    expect(cveDetails).toEqual({});
+    expect(allRisks).toEqual([]);
+    expect(validationRows).toEqual([]);
+  });
+
+  it("copes with a non-numeric cvss by treating it as 0", () => {
+    applyScanResults([{ cve: "CVE-2024-5020", cvss: "9.8" }]);
+    expect(vulnRows[0].cvss).toBe(0);
+    expect(cveDetails["CVE-2024-5020"].cvss).toBe(0);
   });
 });

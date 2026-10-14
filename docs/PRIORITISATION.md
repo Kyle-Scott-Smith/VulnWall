@@ -77,7 +77,7 @@ signed in), `business_context` is `None`.
 
 - `/api/analyze` sorts findings by it (highest first).
 - The UI's "Business Priority" sort, the Excel export column, and the per-finding tooltip show it.
-- It is **not** used for ticket priority: tickets are P1 (Critical), P2 (High) or P3 (everything else) from the finding's severity.
+- It is **not** used for ticket priority: a draft ticket starts as P1 (Critical), P2 (High) or P3 (everything else) from the finding's severity, and can be edited in the Generate Ticket step.
 
 ### Criticality label caveat
 
@@ -132,12 +132,14 @@ not cached, and the cache is lost on restart.
 
 ### How the UI uses the result
 
-- **Validation step:** a finding is **Validated** only if `ai_generated` is true
-  and confidence is ≥ 60; template fallbacks and low-confidence results are
-  **Needs Review**. If no AI result exists at all, a finding is Validated only
-  when it has both a CVSS score and a description.
+- **Validation step:** a finding shows **No flags** unless `ai_generated` is
+  false (a template fallback) or confidence is below 60; those are **Needs
+  Review**. A finding with no confidence value isn't flagged for confidence. If
+  no AI result exists at all, a finding has no flags only when it has both a
+  CVSS score and a description. These are checks on the data, not a
+  verification against external sources.
 - **Detail page:** *Why This Matters*, *Business Impact* (hidden if empty),
-  *Suggested Fix*; confidence is highlighted below 60%.
+  *Suggested Fix*; confidence is highlighted below 60% and shown as *Not assessed* when the AI gave none.
 - If `/api/analyze` fails entirely, the wizard continues with placeholder
   explanations built from the raw scan data.
 

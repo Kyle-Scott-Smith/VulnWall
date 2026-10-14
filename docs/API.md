@@ -99,7 +99,7 @@ User object used in several responses:
 ### `POST /auth/login` — none
 `{"email", "password"}`
 - 200: `{"status": "signed_in", ...user}` or `{"status": "mfa_required", "email"}` (a code was emailed; no session yet).
-- If MFA is on but SMTP isn't configured, the response is `signed_in` (MFA is skipped).
+- 503 `We couldn't send your sign-in code…` if MFA is on but the code couldn't be emailed (SMTP not configured, or the send failed). MFA fails closed: no session is created.
 - 401: invalid credentials (same message for unknown email), or a Google-only account (told to use Google).
 
 ### `POST /auth/logout` — none
@@ -120,7 +120,7 @@ Any of `enabled` (bool, master switch), `level` (`none` | `critical` | `high` | 
 Returns `{"notifyOnCritical", "notifyLevel", "notifyOnJira"}`. 400 for invalid values or an empty body.
 
 ### `PATCH /auth/mfa` — signed in
-`{"enabled": true}` → `{"mfaEnabled": true}`. Takes effect at the next sign-in.
+`{"enabled": true}` → `{"mfaEnabled": true}`. Takes effect at the next sign-in. It is accepted even when email isn't configured; such an account is then refused at sign-in (503) until SMTP works.
 
 ### `GET /auth/users` — Admin
 `[{"id", "name", "email", "role", "authProvider", "createdAt"}, ...]` oldest first.
@@ -135,14 +135,14 @@ Returns `{"notifyOnCritical", "notifyLevel", "notifyOnJira"}`. 400 for invalid v
   - nothing extra — signed in;
   - `?newAccount=1` — a new account was created (the app then shows the questionnaire);
   - `?mfaRequired=1&email=...` — MFA code sent, finish at `/auth/mfa/verify`;
-  - `?authError=...` — cancelled, state mismatch, token/profile failure, unverified Google email.
+  - `?authError=...` — cancelled, state mismatch, token/profile failure, unverified Google email, or an MFA code that couldn't be sent.
   An existing local account with the same email is linked to the Google identity.
 
 ### Email MFA
 - `POST /auth/mfa/verify` — requires a pending sign-in. `{"code": "123456"}` → `{"status": "signed_in", ...user}`. 400 no pending sign-in / no code / expired; 401 incorrect; 429 after 5 wrong attempts (the code is invalidated).
-- `POST /auth/mfa/resend` — requires a pending sign-in → `{"status": "code_resent"}`. 503 if SMTP isn't configured.
+- `POST /auth/mfa/resend` — requires a pending sign-in → `{"status": "code_resent"}`. 429 after 3 resends for one sign-in (the pending sign-in is cleared). 503 if SMTP isn't configured or the send fails; the message is currently the server's raw error text.
 
-Codes: 6 digits, valid 10 minutes, stored hashed.
+Codes: 6 digits, valid 10 minutes, stored hashed. A resend replaces the previous code.
 
 ---
 
@@ -222,7 +222,11 @@ Ticket object:
 Array of the caller's tickets, oldest first.
 
 ### `POST /tickets` — A/An
-Body: an **array** of ticket objects (`id` and `title` required; malformed entries are skipped). Upserts on `(user, id)`. 201 with the caller's full ticket list. 401 if signed out; 400 if not an array.
+Body: an **array** of ticket objects (`title` required; malformed entries are skipped). `id` is optional: a ticket without one is **new** and the server assigns the next free `T-###` number (one above your highest, never below `T-106`); a ticket with an `id` is upserted under that id.
+- 201: `{"tickets": [...caller's full list, oldest first], "created": [...only the tickets this request added or updated, in request order, with their final ids]}`.
+- 400 if not an array; 401 if signed out; 403 for a Viewer.
+
+If a batch mixes an explicit `id` equal to the next free number with a new ticket, both receive that number and the later one overwrites the earlier. Send either ids or no ids in one batch.
 
 ### `PATCH /tickets/<ticket_ref>` — A/An
 `{"status"?: "Open|In Progress|Closed", "assigned"?: "..."}`.

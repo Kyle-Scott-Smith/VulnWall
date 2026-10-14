@@ -1,51 +1,21 @@
 """Endpoint tests for the honest Jira sync behaviour in tickets.py.
-
 Uses a throwaway SQLite file and a stubbed Jira layer — no network. The key
 guarantee under test: a status change on a Jira-linked ticket is only saved
 locally if Jira accepted it.
 """
-import importlib
-import os
-import sqlite3
-import sys
-import tempfile
-
 import pytest
-from flask import Flask
 
 
 @pytest.fixture()
-def env(monkeypatch):
-    tmp = tempfile.mkdtemp()
-    monkeypatch.setenv("AUTH_DB_PATH", os.path.join(tmp, "test.db"))
-    for m in ("auth", "tickets", "jira_integration"):
-        sys.modules.pop(m, None)
-    auth = importlib.import_module("auth")
-    auth.init_db()
-    tickets = importlib.import_module("tickets")
-
-    conn = sqlite3.connect(auth.DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)")]
-    # Insert the minimum NOT NULL columns generically.
-    vals = {"email": "a@b.co", "name": "A", "password_hash": "x", "role": "analyst", "created_at": "2026-01-01"}
-    use = {k: v for k, v in vals.items() if k in cols}
-    conn.execute(f"INSERT INTO users ({','.join(use)}) VALUES ({','.join('?'*len(use))})", list(use.values()))
-    uid = conn.execute("SELECT id FROM users").fetchone()["id"]
+def env(app_env):
+    """One analyst with two tickets: T-1 linked to Jira issue VULN-1, T-2 not linked."""
+    uid = app_env.make_user(email="a@b.co", name="A", role="analyst")
     now = "2026-09-29T00:00:00+00:00"
     for ref, key in (("T-1", "VULN-1"), ("T-2", None)):
-        conn.execute(
+        app_env.execute(
             "INSERT INTO tickets (user_id, ticket_ref, cve, title, status, jira_issue_key, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?)", (uid, ref, "CVE-2024-1", "t", "Open", key, now, now))
-    conn.commit(); conn.close()
-
-    app = Flask(__name__)
-    app.secret_key = "t"
-    app.register_blueprint(tickets.tickets_bp)
-    client = app.test_client()
-    with client.session_transaction() as s:
-        s["user_id"] = uid
-    return client, tickets
+    return app_env.client(uid), app_env.tickets
 
 
 def test_jira_refusal_blocks_local_change(env, monkeypatch):
