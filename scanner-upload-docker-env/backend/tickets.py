@@ -30,6 +30,7 @@ Endpoints registered by this blueprint (mounted at /api/tickets):
 """
 
 import json
+import re
 from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request, session
@@ -97,6 +98,30 @@ def _require_login():
     return session.get("user_id")
 
 
+# New tickets are numbered T-106, T-107, ... The first free number is 106
+# because the frontend's built-in demo tickets occupy T-101..T-105.
+FIRST_TICKET_NUMBER = 106
+_TICKET_REF_RE = re.compile(r"^T-(\d+)$")
+
+
+def _next_ticket_number(conn, user_id):
+    """Next unused ticket number for this user: one above the highest
+    existing T-### ref (never below FIRST_TICKET_NUMBER).
+
+    Previously the frontend numbered every batch from T-106, and because
+    saving is an upsert on (user, ticket_ref), a second batch silently
+    overwrote the first batch's rows. Numbering now happens here, against
+    what is actually stored. Callers must hold a write lock (BEGIN
+    IMMEDIATE) so two concurrent requests can't read the same maximum.
+    """
+    highest = FIRST_TICKET_NUMBER - 1
+    for row in conn.execute("SELECT ticket_ref FROM tickets WHERE user_id = ?", (user_id,)):
+        m = _TICKET_REF_RE.match(row["ticket_ref"] or "")
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return highest + 1
+
+
 def _row_to_json(row):
     return {
         "id": row["ticket_ref"],
@@ -126,7 +151,7 @@ def list_tickets():
     conn = _get_db()
     try:
         rows = conn.execute(
-            "SELECT * FROM tickets WHERE user_id = ? ORDER BY created_at", (user_id,)
+            "SELECT * FROM tickets WHERE user_id = ? ORDER BY created_at, id", (user_id,)
         ).fetchall()
     finally:
         conn.close()
@@ -137,9 +162,18 @@ def list_tickets():
 @tickets_bp.route("", methods=["POST"])
 @require_role("admin", "analyst")
 def create_tickets():
-    """Bulk-save tickets. Body: array of {id, cve, title, priority, status,
-    assigned, date, cvss, confidence, fixes, why} — the exact shape
-    ReviewSendStep already builds in the frontend before this call."""
+    """Bulk-save tickets. Body: array of {id?, cve, title, priority, status,
+    assigned, date, cvss, confidence, fixes, why}.
+
+    `id` is optional. A ticket without one is a NEW ticket: the server
+    assigns the next free T-### number (so a second batch can never
+    overwrite the first). A ticket with an `id` is upserted under that id,
+    which is how an existing ticket is updated.
+
+    Response (201): {"tickets": [the caller's full list, oldest first],
+                     "created": [only the tickets this request added/updated,
+                                 in request order, with their final ids]}.
+    """
     user_id = _require_login()
     if not user_id:
         return jsonify({"error": "You must be signed in"}), 401
@@ -151,9 +185,18 @@ def create_tickets():
     now = datetime.now(timezone.utc).isoformat()
     conn = _get_db()
     try:
+        # Take the write lock before reading the current maximum so that
+        # numbering + inserting is atomic with respect to other requests.
+        conn.execute("BEGIN IMMEDIATE")
+        next_number = _next_ticket_number(conn, user_id)
+        saved_refs = []
         for t in body:
-            if not isinstance(t, dict) or not t.get("id") or not t.get("title"):
+            if not isinstance(t, dict) or not t.get("title"):
                 continue  # skip malformed entries rather than failing the whole batch
+            ref = t.get("id")
+            if not ref:
+                ref = f"T-{next_number:03d}"
+                next_number += 1
             conn.execute(
                 """
                 INSERT INTO tickets (
@@ -178,7 +221,7 @@ def create_tickets():
                     updated_at=excluded.updated_at
                 """,
                 (
-                    user_id, t.get("id"), t.get("cve"), t.get("title"),
+                    user_id, ref, t.get("cve"), t.get("title"),
                     t.get("priority"), t.get("status") or "Open", t.get("assigned"),
                     t.get("date"), t.get("cvss"), t.get("confidence"),
                     json.dumps(t.get("fixes") or []), t.get("why"),
@@ -187,15 +230,24 @@ def create_tickets():
                     now, now,
                 ),
             )
+            saved_refs.append(ref)
         conn.commit()
 
         rows = conn.execute(
-            "SELECT * FROM tickets WHERE user_id = ? ORDER BY created_at", (user_id,)
+            "SELECT * FROM tickets WHERE user_id = ? ORDER BY created_at, id", (user_id,)
         ).fetchall()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
-    return jsonify([_row_to_json(r) for r in rows]), 201
+    all_tickets = [_row_to_json(r) for r in rows]
+    by_ref = {t["id"]: t for t in all_tickets}
+    return jsonify({
+        "tickets": all_tickets,
+        "created": [by_ref[r] for r in saved_refs if r in by_ref],
+    }), 201
 
 
 @tickets_bp.route("/<ticket_ref>", methods=["PATCH"])
@@ -342,7 +394,7 @@ def sync_with_jira():
         conn.commit()
 
         all_rows = conn.execute(
-            "SELECT * FROM tickets WHERE user_id = ? ORDER BY created_at", (user_id,)
+            "SELECT * FROM tickets WHERE user_id = ? ORDER BY created_at, id", (user_id,)
         ).fetchall()
     finally:
         conn.close()

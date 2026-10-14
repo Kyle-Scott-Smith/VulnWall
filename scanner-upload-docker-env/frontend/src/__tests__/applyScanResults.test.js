@@ -4,7 +4,7 @@
 // AI Analysis / Select / Validation flow silently, since nothing else
 // re-derives this data independently.
 import { describe, expect, it } from "vitest";
-import { applyScanResults, cveDetails, vulnRows, allRisks, validationRows, lastVulnerabilities, lastScanMeta } from "../App.jsx";
+import { applyScanResults, validationReasons, cveDetails, vulnRows, allRisks, validationRows, lastVulnerabilities, lastScanMeta } from "../App.jsx";
 
 describe("applyScanResults", () => {
   it("defaults missing fields (severity, cvss, asset)", () => {
@@ -48,8 +48,8 @@ describe("applyScanResults", () => {
     expect(d.aiGenerated).toBe(false);
     expect(d.why).toBe("A thing is broken.");
     expect(d.fixes[0]).toContain("Upgrade libfoo beyond the installed version (1.2.3)");
-    // Has both cvss and description -> heuristic confidence is high (95).
-    expect(d.confidence).toBe(95);
+    // No AI ran, so there is no confidence. It used to be invented (95/65).
+    expect(d.confidence).toBeNull();
   });
 
   it("uses the real AI fields when ai_generated is present, even if false (template fallback)", () => {
@@ -83,7 +83,7 @@ describe("applyScanResults", () => {
       { cve: "CVE-2024-0010", cvss: 5.0 }, // missing description
     ]);
     const byId = Object.fromEntries(validationRows.map(r => [r.id, r.status]));
-    expect(byId["CVE-2024-0008"]).toBe("Validated");
+    expect(byId["CVE-2024-0008"]).toBe("No flags");
     expect(byId["CVE-2024-0009"]).toBe("Needs Review");
     expect(byId["CVE-2024-0010"]).toBe("Needs Review");
   });
@@ -95,9 +95,27 @@ describe("applyScanResults", () => {
       { cve: "CVE-2024-0013", ai_generated: false, confidence: 90 }, // template fallback, not real AI
     ]);
     const byId = Object.fromEntries(validationRows.map(r => [r.id, r.status]));
-    expect(byId["CVE-2024-0011"]).toBe("Validated");
+    expect(byId["CVE-2024-0011"]).toBe("No flags");
     expect(byId["CVE-2024-0012"]).toBe("Needs Review");
     expect(byId["CVE-2024-0013"]).toBe("Needs Review");
+  });
+
+  it("never invents a confidence: AI result without one stays null, not 50", () => {
+    applyScanResults([{ cve: "CVE-2024-0020", ai_generated: true, why: "x" }]);
+    expect(cveDetails["CVE-2024-0020"].confidence).toBeNull();
+  });
+
+  it("gives a plain-language reason for every flag, and none when nothing is flagged", () => {
+    applyScanResults([
+      { cve: "CVE-2024-0021", cvss: 5.0, description: "ok" },
+      { cve: "CVE-2024-0022", description: "no score" },
+      { cve: "CVE-2024-0023", ai_generated: true, confidence: 40 },
+    ]);
+    const byId = Object.fromEntries(validationRows.map(r => [r.id, r]));
+    expect(byId["CVE-2024-0021"].reasons).toEqual([]);
+    expect(byId["CVE-2024-0022"].reasons).toEqual(["The scanner gave no CVSS score."]);
+    expect(byId["CVE-2024-0023"].reasons[0]).toContain("low confidence");
+    expect(byId["CVE-2024-0023"].reasons[0]).toContain("40%");
   });
 
   it("uses title as the id when no cve is present, and only the title (not id) falls back when neither is", () => {
@@ -136,5 +154,21 @@ describe("applyScanResults", () => {
     // Second call (e.g. the AI-analysis re-apply) omits meta — should not wipe it out.
     applyScanResults([{ cve: "CVE-2024-0040", ai_generated: true }]);
     expect(lastScanMeta).toEqual({ scanner: "trivy", source: "upload", target: "image:latest" });
+  });
+});
+
+describe("validationReasons", () => {
+  it("reports every missing-data reason before AI has run", () => {
+    expect(validationReasons({})).toEqual(["The scanner gave no CVSS score.", "The scanner gave no description."]);
+  });
+  it("flags a template fallback", () => {
+    expect(validationReasons({ ai_generated: false })[0]).toContain("generic template");
+  });
+  it("does not flag a real AI result at or above the threshold", () => {
+    expect(validationReasons({ ai_generated: true, confidence: 60 })).toEqual([]);
+    expect(validationReasons({ ai_generated: true })).toEqual([]);
+  });
+  it("can give both a template and low-confidence reason", () => {
+    expect(validationReasons({ ai_generated: false, confidence: 10 })).toHaveLength(2);
   });
 });
