@@ -498,7 +498,7 @@ function Stepper({ currentStep }) {
 const NAV_TAB_LABELS = { dashboard: "Dashboard", "upload-scan": "Upload Scan", history: "Scan History", tickets: "Tickets", users: "Users" };
 const ROLE_LABELS = { admin: "Admin", analyst: "Security Analyst", viewer: "Viewer" };
 
-function navTabsForRole(role) {
+export function navTabsForRole(role) {
   const tabs = ["dashboard", "upload-scan", "history", "tickets"];
   if (role === "viewer") return tabs.filter(t => t !== "upload-scan");
   if (role === "admin") return [...tabs, "users"];
@@ -548,7 +548,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Password rule: 8+ chars, at least one lowercase, one uppercase, one
 // number, and one symbol. Stated in the UI hint so it's obvious upfront
 // rather than only surfacing after a rejected signup.
-function passwordError(password) {
+export function passwordError(password) {
   if (password.length < 8) return "Password must be at least 8 characters";
   if (!/[a-z]/.test(password)) return "Password must include a lowercase letter";
   if (!/[A-Z]/.test(password)) return "Password must include an uppercase letter";
@@ -994,7 +994,7 @@ const qFieldStyle = { width: "100%", padding: "10px 14px", borderRadius: 8, bord
 
 // Looks up the human-readable label for a stored value in one of the
 // *_OPTIONS arrays above — used by the read-only summary in Profile.
-function optionLabel(options, value) {
+export function optionLabel(options, value) {
   return options.find(o => o.value === value)?.label || value;
 }
 
@@ -1018,7 +1018,7 @@ function RadioOption({ checked, label, onChange }) {
 
 // Toggling a "none"-style option in a multi-select clears every other
 // option (and vice versa) — same rule the backend enforces.
-function toggleMulti(list, value, exclusiveValue = "none") {
+export function toggleMulti(list, value, exclusiveValue = "none") {
   if (value === exclusiveValue) return list.includes(value) ? [] : [exclusiveValue];
   const withoutExclusive = list.filter(v => v !== exclusiveValue);
   return withoutExclusive.includes(value) ? withoutExclusive.filter(v => v !== value) : [...withoutExclusive, value];
@@ -2043,7 +2043,7 @@ function FilterBar({ search, onSearchChange, searchPlaceholder = "Search…", gr
 
 // Matches a row against a free-text search term across whichever fields are
 // present on that row shape (cve/id, title, asset, description).
-function matchesSearch(row, term) {
+export function matchesSearch(row, term) {
   if (!term.trim()) return true;
   const t = term.trim().toLowerCase();
   return [row.id, row.title, row.desc, row.asset]
@@ -2060,7 +2060,7 @@ const PRIORITY_RANK = { "P1 - Critical": 3, "P1": 3, "P2 - High": 2, "P2": 2, "P
 // Generic sort helper shared by Select/Validation/GenerateTicket/Review.
 // `field` is the row key to sort by ("id" | "severity" | "cvss" | ...),
 // `dir` is "asc" | "desc". Pass field === "None" (or falsy) to skip sorting.
-function sortRows(rows, field, dir = "asc") {
+export function sortRows(rows, field, dir = "asc") {
   if (!field || field === "None") return rows;
   const rank = row => {
     let v = row[field];
@@ -3927,7 +3927,7 @@ function ScanHistory() {
   );
 }
 
-function _fmtDate(iso) {
+export function _fmtDate(iso) {
   if (!iso) return "—";
   try {
     return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
@@ -4048,7 +4048,7 @@ const PROFILE_PREFS_PREFIX = "vulnwiz-profile-prefs:";
 // sign-in/sign-up handlers below), this is just what shows before that.
 const DEFAULT_PROFILE_PREFS = { notifications: false, defaultAssign: "Security Team" };
 
-function loadProfilePrefs(email) {
+export function loadProfilePrefs(email) {
   if (!email) return DEFAULT_PROFILE_PREFS;
   try {
     const raw = localStorage.getItem(PROFILE_PREFS_PREFIX + email);
@@ -4063,7 +4063,7 @@ function loadProfilePrefs(email) {
   }
 }
 
-function saveProfilePrefs(email, prefs) {
+export function saveProfilePrefs(email, prefs) {
   if (!email) return;
   try {
     localStorage.setItem(PROFILE_PREFS_PREFIX + email, JSON.stringify(prefs));
