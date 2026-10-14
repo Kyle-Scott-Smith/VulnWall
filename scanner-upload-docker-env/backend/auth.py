@@ -433,15 +433,18 @@ def login():
         try:
             mfa.start_mfa_challenge(row)
         except EnvironmentError as e:
-            # SMTP isn't configured on this server, so we can't actually
-            # deliver a code -- degrade to signing them straight in rather
-            # than locking the account out entirely (same "not configured
-            # -> skip, don't fail the request" pattern as everywhere else
-            # in this app that reads on an env-var-gated integration).
+            # Fail CLOSED: the code couldn't be delivered (SMTP not
+            # configured, or the send itself failed), so refuse the sign-in.
+            # Signing them straight in here would let a mail outage silently
+            # bypass the second factor -- exactly what MFA exists to prevent
+            # (see mfa.py's module docstring).
             print(f"[auth] MFA enabled for {row['email']} but couldn't send a code: {e}")
             session.clear()
-            session["user_id"] = row["id"]
-            return jsonify({"status": "signed_in", **_user_to_json(row)})
+            return jsonify({
+                "error": "We couldn't send your sign-in code, so you can't be "
+                         "signed in right now. Please try again later or "
+                         "contact your administrator."
+            }), 503
 
         session.clear()
         session["mfa_pending_user_id"] = row["id"]

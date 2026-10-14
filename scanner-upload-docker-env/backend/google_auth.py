@@ -178,17 +178,21 @@ def callback():
         try:
             mfa.start_mfa_challenge(row)
         except EnvironmentError as e:
+            # Fail CLOSED, same as auth.py's login(): no code delivered
+            # means no sign-in, rather than silently skipping the second
+            # factor.
             print(f"[google_auth] MFA enabled for {email} but couldn't send a code: {e}")
-        else:
             session.clear()
-            session["mfa_pending_user_id"] = user_id
-            separator = "&" if "?" in FRONTEND_RETURN_URL else "?"
-            return redirect(
-                f"{FRONTEND_RETURN_URL}{separator}mfaRequired=1&email={requests.utils.quote(email)}"
+            return _redirect_with_error(
+                "We couldn't send your sign-in code, so you can't be signed "
+                "in right now. Please try again later or contact your administrator."
             )
-        # SMTP not configured on this server — fall through and sign them
-        # in directly rather than stranding the account, same degrade as
-        # auth.py's login().
+        session.clear()
+        session["mfa_pending_user_id"] = user_id
+        separator = "&" if "?" in FRONTEND_RETURN_URL else "?"
+        return redirect(
+            f"{FRONTEND_RETURN_URL}{separator}mfaRequired=1&email={requests.utils.quote(email)}"
+        )
 
     session.clear()
     session["user_id"] = user_id
