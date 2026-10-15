@@ -10,11 +10,19 @@ it only knows what's in the scan you hand it.
 
 Previously called the Claude API — swapped to a local Ollama model via
 ollama_client.py. Interface (.ask()) is unchanged.
+
+Recent incidents: each finding line in the context also carries an ACSC
+marker (threat_intel.py) when the Australian Cyber Security Centre has an
+Alert or Advisory referencing that CVE, so questions like "what should we
+fix first" or "any of these being actively exploited" can be answered
+using real, current threat reporting instead of the model's own (possibly
+stale) training knowledge.
 """
 import logging
 import os
 
 from ollama_client import chat as ollama_chat
+import threat_intel
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +38,15 @@ Rules:
 - Be concise: a few sentences or a short list, not a report.
 - When asked "which CVEs affect host X" or similar, list matching CVE IDs with severity.
 - When asked for a count or "how many", give the exact number from the data below.
+- A finding tagged "acsc=ALERT" has an active ACSC Alert from the Australian Cyber Security Centre — ACSC's
+  highest-urgency designation, typically active/imminent exploitation. Treat these as top priority when asked
+  "what should we fix first" or about recent incidents/active exploitation, and say plainly that ACSC has an
+  Alert out for it.
+- A finding tagged "acsc=ADVISORY" has an ACSC Advisory referencing it — official guidance, NOT confirmation of
+  active exploitation. Mention it if relevant, but do not describe it as "actively exploited" or treat it with
+  the same urgency as acsc=ALERT.
+- A finding with no acsc tag has no current ACSC Alert/Advisory reporting. If asked specifically about ACSC/ASD
+  reporting or recent incidents and nothing in the data is tagged, say so plainly rather than guessing.
 
 Current scan data ({count} findings):
 {context}
@@ -47,11 +64,15 @@ class ScanChatbot:
         lines = []
         for v in vulnerabilities[:CHAT_MAX_CONTEXT_VULNS]:
             cve = v.get("cve") or v.get("title") or "Unknown"
-            lines.append(
+            line = (
                 f"- {cve} | title={v.get('title', '')} | severity={v.get('severity', 'Unknown')} | "
                 f"cvss={v.get('cvss', 'unknown')} | asset={v.get('asset', 'unknown')} | "
                 f"package={v.get('package', 'n/a')}"
             )
+            acsc_entries = threat_intel.get_acsc_entries(v.get("cve"))
+            if acsc_entries:
+                line += f" | acsc={'ALERT' if threat_intel.has_alert(acsc_entries) else 'ADVISORY'}"
+            lines.append(line)
         if len(vulnerabilities) > CHAT_MAX_CONTEXT_VULNS:
             lines.append(
                 f"... and {len(vulnerabilities) - CHAT_MAX_CONTEXT_VULNS} more findings not shown "

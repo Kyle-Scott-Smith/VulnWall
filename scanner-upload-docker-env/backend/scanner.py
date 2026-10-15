@@ -13,6 +13,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 import tenable_client
+import threat_intel
 from ai_analysis import OllamaVulnerabilityAnalyzer
 from chatbot import ScanChatbot
 
@@ -109,6 +110,14 @@ def ollama_status():
         })
     except ollama_client.OllamaError as e:
         return jsonify({"ollama_host": ollama_client.OLLAMA_HOST, "requested_model": requested, "error": str(e)}), 503
+
+
+@app.route("/api/threat-intel-status", methods=["GET"])
+def threat_intel_status():
+    """Diagnostic endpoint for the ASD ACSC Alerts/Advisories feed
+    integration (threat_intel.py) — same pattern as /api/ollama-status
+    above, so this is visible/debuggable the same way."""
+    return jsonify(threat_intel.status())
 
 
 @app.route("/api/scanners", methods=["GET"])
