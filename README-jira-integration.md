@@ -92,10 +92,10 @@ On *Send to Jira*, for each approved ticket the frontend:
 
 1. checks `/api/jira/status`; if Jira isn't connected, nothing is pushed and a
    banner explains the tickets were saved in the app only;
-2. calls `/api/jira/create-ticket` with the finding's title and the AI "why" text;
+2. calls `/api/jira/create-ticket` with the approved ticket's title and description (as edited in the Generate Ticket step; the description starts as the AI "why" text);
 3. records the returned `issueKey` and `url` on the ticket;
-4. saves all tickets to the account (`POST /api/tickets`) — pushed or not — and
-   records the scan (`POST /api/scans`).
+4. saves all tickets to the account (`POST /api/tickets`) — pushed or not; the
+   server assigns the ticket numbers — and records the scan (`POST /api/scans`).
 
 The success screen reports *N of M tickets created in Jira*. Tickets that
 weren't pushed show a **Not in Jira** badge on the Tickets page; changes to them
@@ -118,9 +118,9 @@ clear message (reconnect Jira if `accountId` is missing).
 
 ### What gets created
 
-An issue of type **`Task`** with the finding's title as summary and a minimal
-Atlassian Document Format description containing the AI "why" text (or "(no
-description provided)"). The `priority` the frontend sends is currently **ignored**,
+An issue of type **`Task`** with the ticket's title as summary and a minimal
+Atlassian Document Format description containing the ticket's description (the
+AI "why" text unless edited; or "(no description provided)"). The `priority` the frontend sends is currently **ignored**,
 and the business impact and suggested fixes are **not** included. The returned
 URL is built as `https://<site name>.atlassian.net/browse/<KEY>`.
 

@@ -21,6 +21,7 @@ pushed straight into Jira.
 > | [`docs/PRIORITISATION.md`](docs/PRIORITISATION.md) | Exactly how the business-priority score and AI analysis work |
 > | [`README-jira-integration.md`](README-jira-integration.md) | Jira OAuth, ticket push, two-way status sync |
 > | [`README-ollama-swap.md`](README-ollama-swap.md) | The local Ollama AI backend and how to change models |
+> | [`TESTING.md`](TESTING.md) | Test suites, what they guarantee, and tests that document known problems |
 
 ---
 
@@ -252,14 +253,14 @@ glossary tooltips (`Glossary.jsx`).
 | **1. Upload Scan** | Drag in a `.json` report (Trivy or Tenable, max 20 MB) **or** switch to "Run a live scan". When results arrive the app shows how many findings were found (and how many are also confirmed in Tenable.io), then automatically runs AI analysis. **Next stays disabled ("Analyzing…") until analysis finishes.** |
 | **2. AI Summary** | Headline numbers, a ranked risk list (top 3, expandable) you can filter by severity and sort (None / Business Priority / CVE / Severity / CVSS), and an **Export to Excel** button. Click a finding for its detail page. |
 | **3. Select** | Table of all findings, **all selected by default**. Search, filter, sort and tick the ones to ticket. At least one must be selected. |
-| **4. Validation** | Shows only the selected findings as **Validated** or **Needs Review**. A finding needs review if AI analysis fell back to the template, or its confidence is below 60%, or (when no AI result exists) the scanner gave no CVSS score or description. You can remove findings individually or "Remove All Non-Validated". |
-| **5. Generate Ticket** | One draft ticket per selected finding. Approve or reject each (bulk approve/reject applies to whatever the current filters show). Every ticket must be decided before continuing; only approved tickets move on. |
-| **6. Review & Send** | Final list of approved tickets. **Send to Jira** pushes each ticket to Jira if connected, saves all tickets to your account, records the scan to history (this is what triggers alert emails), and shows how many tickets reached Jira. If Jira isn't connected (or a push fails) tickets are still saved in the app and marked "Not in Jira". |
+| **4. Validation** | Shows only the selected findings as **No flags** or **Needs Review**, with the reasons for each flag. These are checks on the data we hold, not a verification against NVD or vendor advisories. A finding needs review if AI analysis fell back to the template, or its confidence is below 60%, or (when no AI result exists) the scanner gave no CVSS score or description. You can remove findings individually or with **Remove all flagged**. |
+| **5. Generate Ticket** | One draft ticket per selected finding, pre-filled with the title, a description (the AI "why" text), a priority from severity (Critical → P1, High → P2, otherwise P3) and an assignee. You can edit the title, priority, description and assignee of each draft. The assignee uses your Profile **Default assign to** (Security Team until you change it; saved per browser). Approve or reject each (bulk approve/reject applies to whatever the current filters show). Every ticket must be decided before continuing; only approved tickets move on, **with your edits**. Edits and decisions are kept if you go back and return, as long as the selection hasn't changed. |
+| **6. Review & Send** | Final list of approved tickets. **Send to Jira** pushes each approved ticket (its title and edited description) to Jira if connected, saves all tickets to your account (the server numbers new tickets, so a second batch never overwrites the first), records the scan to history (this is what triggers alert emails), and shows how many tickets reached Jira. If Jira isn't connected (or a push fails) tickets are still saved in the app and marked "Not in Jira". |
 
 **The finding detail page** has tabs: *Why This Matters*, *Business Impact*
 (only if non-empty, i.e. business context was available), and *Suggested Fix*
 (first step shown, rest behind "Read more"); a criticality label; AI confidence
-(highlighted when below 60%); and evidence links to the NVD and CVE.org records
+(highlighted when below 60%, and shown as *Not assessed* when the AI gave none); and evidence links to the NVD and CVE.org records
 (real CVE ids only) plus up to five scanner-supplied references. These are
 plain links — the app does not claim to have verified anything against them.
 
@@ -290,7 +291,7 @@ page loses it.
   tickets read-only.
 - **Profile** — account details (name; email unless the account signs in with
   Google; organisation and role are Admin-only), email notification settings,
-  two-factor toggle, a "Default assign to" preference, the business-context
+  two-factor toggle, a "Default assign to" preference (saved per browser; new draft tickets start with it), the business-context
   summary (editable by Admin/Analyst), integrations (Connect Jira, Connect
   private registry — hidden for Viewers), restart-tutorial, and sign out.
 - **Users** (Admin only) — list every account and change roles. The last
@@ -447,13 +448,15 @@ failure or missing SMTP configuration is logged and never fails the request.
 
 Opt-in per account from the Profile page. After the password (or Google) check,
 a 6-digit code is emailed (valid 10 minutes, hashed at rest, 5 attempts, with a
-resend button). Only after the code is verified is the session created.
+resend button, limited to 3 resends per sign-in). Only after the code is verified is
+the session created.
 
-> **If SMTP is not configured, sign-in skips the code and signs the user straight
-> in** (for both password and Google logins). This is a deliberate "don't lock
-> people out" fallback in `auth.py` / `google_auth.py` — note that the header
-> comment in `mfa.py` still describes it as failing closed. Configure SMTP
-> before relying on MFA.
+> **MFA fails closed.** If a code can't be delivered (SMTP isn't configured, or
+> the send fails), the sign-in is refused and no session is created: a password
+> login gets a 503 error, and a Google login returns to the app with an error.
+> The Profile toggle isn't blocked when email is unavailable, so an account that
+> turns MFA on without working email can't sign in until email is configured.
+> Configure SMTP before enabling MFA.
 
 ---
 
@@ -514,7 +517,7 @@ cookie set at sign-in and sends `credentials: "include"`. Errors are
 | Method | Route | Access | Purpose |
 |---|---|---|---|
 | GET | `/tickets` | none* | List the user's tickets |
-| POST | `/tickets` | A/An | Bulk-save tickets (upsert by `id`) |
+| POST | `/tickets` | A/An | Bulk-save tickets (the server numbers new ones; an explicit `id` upserts) |
 | PATCH | `/tickets/<ticket_ref>` | A/An | Update status / assignee (status pushed to Jira first) |
 | POST | `/tickets/sync` | signed in | Pull current statuses from Jira |
 | GET | `/jira/status` | none* | Is Jira configured / connected? |
@@ -594,31 +597,13 @@ history and tickets (the next sign-up becomes Admin again).
 docker compose exec backend pip install -r requirements-dev.txt
 docker compose exec backend pytest --cov=. --cov-report=term-missing
 
-# Frontend (Vitest)
+# Frontend (Vitest) — run the export script once first
+docker compose exec frontend sh scripts/export-test-helpers.sh
 docker compose exec frontend npm test
 ```
 
-**Backend** (`backend/tests/`, config in `pytest.ini`):
-
-| File | Covers |
-|---|---|
-| `test_business_priority_score.py` | `compute_business_priority_score`: no-context fallback, tier multipliers, internet exposure, sensitive data, compliance, air-gap, a hand-calculated combined case. **Does not yet cover** `topConcern`, `exposedSystems`, `revenueGenerating` or `hadBreach`. |
-| `test_jira_transitions.py` | Status → Jira-category map and `pick_transition` |
-| `test_scanner_utils.py` | `normalize_vuln`, `dedupe_by_cve`, `sort_by_severity`, severity casing |
-| `test_ticket_jira_sync.py` | `PATCH /api/tickets/<ref>` and `POST /api/tickets/sync` behaviour (Jira refusal, success, no connection, local-only edits, partial sync failures) using a temporary database |
-
-**Frontend** (`frontend/src/__tests__/`, Vitest in `node` environment, no DOM):
-
-| File | Covers |
-|---|---|
-| `applyScanResults.test.js` | Turning backend findings into the wizard's state, AI vs placeholder fields, Needs Review rules |
-| `criticalityBand.test.js` | Criticality label thresholds (and documents the quirk described under Known issues) |
-| `evidence.test.js` | NVD / CVE.org / reference links, `formatSyncedAt` |
-| `splitSummary.test.js` | Lead-sentence splitting for "Read more" |
-
-There are currently no automated tests for authentication, MFA, scan history,
-the dashboard, business-context validation, the scanner plugins' parsers, or the
-AI analyser/chatbot.
+The full file-by-file list, the ticket and MFA guarantees, and the tests that deliberately document known
+problems (strict `xfail`) are in [`TESTING.md`](TESTING.md).
 
 ---
 
@@ -640,7 +625,7 @@ For a real deployment:
   are stored **unencrypted** in SQLite. Encrypt them or move them to a secrets
   store first.
 - There is no login rate limiting, e-mail verification or password reset. MFA
-  codes are limited to 5 attempts and 10 minutes.
+  codes are limited to 5 attempts and 10 minutes, and a pending sign-in can request at most 3 resends.
 - Session cookies use Flask defaults (no explicit `Secure` / `SameSite` settings).
 - AI and scan inputs: scan targets are validated against a conservative pattern
   and passed to Trivy as a list (no shell), and the Trivy registry password is
@@ -667,56 +652,48 @@ __pycache__/
 ## Known issues and limitations
 
 These describe the code as it currently stands (found while auditing it against
-this documentation). Items 1–4 are the most likely to surprise users.
+this documentation). The first four items are the most likely to surprise users.
 
-1. **Ticket ids are reused.** The Review & Send step numbers new tickets
-   `T-106`, `T-107`, … *every time*. Because tickets are saved with an upsert on
-   `(user, ticket id)`, sending a second batch overwrites the earlier batch's
-   rows with the same ids (and, until the page is reloaded, the Tickets list can
-   show duplicates).
-2. **Edits made in the Generate Ticket step are not carried forward.** Only the
-   approve/reject decision moves on. Review & Send rebuilds each ticket from the
-   finding: title = the finding's title, description = the AI "why" text,
-   priority = P1/P2/P3 from severity (Critical → P1, High → P2, otherwise P3),
-   assignee = Security Team for Critical, otherwise IT Operations.
-3. **"Default assign to" (Profile) has no effect.** It is saved in
-   `localStorage` but nothing reads it.
-4. **Jira push is minimal:** the `priority` field is accepted but ignored (every
-   issue is a plain `Task`), the Jira description contains only the AI "why"
-   text, access tokens expire after ~1 hour with no refresh (reconnect from
+1. **Jira push is minimal:** the `priority` field is accepted but ignored (every
+   issue is a plain `Task`), the Jira description is just the (possibly edited) ticket
+   description, access tokens expire after ~1 hour with no refresh (reconnect from
    Profile), only the *first* accessible Jira site is used, and the issue URL
    assumes `https://<site name>.atlassian.net`. See
    [`README-jira-integration.md`](README-jira-integration.md).
-5. **The criticality label ignores business context.** The detail page's
+2. **The criticality label ignores business context.** The detail page's
    High/Medium/Low criticality label is computed from `score ÷ ceiling` where the
    business multiplier cancels out algebraically, so it always equals the plain
    CVSS band (≥ 7.0 High, ≥ 4.0 Medium, else Low). Business context only changes
    the score and the ordering. A regression test documents this.
-6. **Some collected or returned data is not used:** the questionnaire's
+3. **Some collected or returned data is not used:** the questionnaire's
    "air-gapped details" and "has security team" answers are stored but never
    used (the form hint about excluding systems from scans is not implemented),
    and the AI's `priority_tier` is returned but never displayed — ticket
    priority comes from severity alone.
-7. **The dashboard's "AI insight" is a fixed, rule-based sentence**, not model
+4. **The dashboard's "AI insight" is a fixed, rule-based sentence**, not model
    output. Ticket activity tiles are based on the 20 most recently updated tickets.
-8. **Chat duplicates the latest question.** The frontend sends the new question
+5. **Chat duplicates the latest question.** The frontend sends the new question
    both as `question` and as the last entry of `history`, so the model sees it twice.
-9. **Trivy limits:** targets starting with `/` or `.` are rejected, and
+6. **Trivy limits:** targets starting with `/` or `.` are rejected, and
    `mode: "docker"` cannot work inside the bundled backend container.
-10. **AI analysis is one blocking request.** `/api/analyze` analyses every
+7. **AI analysis is one blocking request.** `/api/analyze` analyses every
     finding in a single HTTP call (4 at a time by default), with no cap or
     progress indicator, and Next stays disabled until it returns. Large scans on
     a CPU-only machine can take a long time; a per-call Ollama timeout falls
     back to the template for that finding. Tenable cross-referencing is also one
     sequential request per CVE.
-11. **MFA fails open** when SMTP isn't configured (see above).
-12. **Wizard and chat state are in-memory.** Refreshing the page discards an
+8. **Wizard and chat state are in-memory.** Refreshing the page discards an
     in-progress scan; the app also contains hard-coded demo findings that show
     before the first real scan is loaded.
-13. **Product naming is inconsistent** across the project (README "T170
+9. **Product naming is inconsistent** across the project (README "T170
     Vulnerability Scanner", `package.json` "security-dashboard-demo", the
     tutorial "P972", the Jira doc "VulnScanner", the browser-storage prefix
     "vulnwiz-profile-prefs:").
+10. **MFA can be switched on when email isn't configured.** MFA now fails closed, so such an account is refused
+   at its next sign-in (503) and nothing in the app can turn MFA off for it. Configure SMTP before enabling MFA.
+11. **Explicit ids in a ticket batch.** If a `POST /api/tickets` batch contains an explicit id equal to the next
+   free number (e.g. `T-106`) alongside a new ticket, both get that number and the second overwrites the first.
+   The shipped UI never sends ids; only direct API callers can hit this.
 
 ---
 
@@ -729,6 +706,7 @@ this documentation). Items 1–4 are the most likely to surprise users.
 ├── README.md
 ├── README-jira-integration.md
 ├── README-ollama-swap.md
+├── TESTING.md                      # test suites and guarantees
 ├── docs/
 │   ├── API.md                      # endpoint reference
 │   └── PRIORITISATION.md           # scoring + AI analysis details
@@ -736,6 +714,7 @@ this documentation). Items 1–4 are the most likely to surprise users.
 │   ├── Dockerfile                  # node:20-alpine, runs the Vite dev server
 │   ├── package.json / package-lock.json
 │   ├── vite.config.js              # dev server (0.0.0.0:5173, polling) + Vitest config
+│   ├── scripts/export-test-helpers.sh  # exposes helpers from App.jsx for the tests
 │   ├── index.html
 │   └── src/
 │       ├── main.jsx                # mounts <App />
@@ -743,6 +722,8 @@ this documentation). Items 1–4 are the most likely to surprise users.
 │       ├── Tutorial.jsx            # in-app spotlight walkthrough
 │       ├── Glossary.jsx            # plain-language glossary + <Term> tooltips
 │       ├── evidence.js             # NVD / CVE.org links, reference cleaning, sync-time text
+│       ├── confidence.js           # AI confidence helpers
+│       ├── ticketDrafts.js         # draft-ticket helpers
 │       └── __tests__/              # Vitest unit tests
 └── backend/
     ├── Dockerfile                  # Python 3.12 + Trivy CLI; runs `python scanner.py`

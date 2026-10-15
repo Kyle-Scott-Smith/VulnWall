@@ -59,10 +59,10 @@ export const GLOSSARY = {
     short:
       "The AI wasn't sure about this one, or the scanner left out some details. It may be a false positive, so a person should double-check it before a ticket is created.",
   },
-  validated: {
-    label: "Validated",
+  noFlags: {
+    label: "No flags",
     short:
-      "The AI was confident about this finding and the scanner gave enough detail to back it up. It's still worth a glance, but it's likely a real issue.",
+      "Our automatic checks found nothing to flag: the scanner gave a CVSS score and description, and the AI analysis ran with reasonable confidence. This is not proof the finding is real or that the AI is right. It's still worth a glance, and the reference links on the detail page let you check it yourself.",
   },
   aiConfidence: {
     label: "AI confidence",

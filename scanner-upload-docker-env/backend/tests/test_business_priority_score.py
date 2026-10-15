@@ -32,7 +32,6 @@ def _ctx(**overrides):
 # ---------------------------------------------------------------------------
 # No business context — collapses to plain CVSS/severity
 # ---------------------------------------------------------------------------
-
 def test_no_business_context_uses_raw_cvss():
     assert compute_business_priority_score({"cvss": 7.2}, None) == 7.2
 
@@ -48,7 +47,6 @@ def test_no_business_context_unknown_severity_defaults_lowest():
 # ---------------------------------------------------------------------------
 # Criticality tier multiplier — every tier, on its own (neutral exposure)
 # ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("tier", [1, 2, 3, 4, 5])
 def test_tier_multiplier_applied_alone(tier):
     vuln = {"cvss": 8.0}
@@ -72,7 +70,6 @@ def test_tier_1_life_safety_scores_higher_than_tier_5_no_impact():
 # ---------------------------------------------------------------------------
 # Internet-facing exposure bonus — every level, on its own
 # ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("exposure,bonus", [("public", 1.5), ("mixed", 0.75), ("internal", 0.0)])
 def test_internet_facing_bonus(exposure, bonus):
     vuln = {"cvss": 6.0}
@@ -94,7 +91,6 @@ def test_public_facing_scores_higher_than_internal():
 # ---------------------------------------------------------------------------
 # Sensitive data bonus — only sensitive types should trigger it
 # ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("data_type", ["credentials", "financial", "medical", "pii", "intellectual_property"])
 def test_each_sensitive_data_type_adds_bonus(data_type):
     vuln = {"cvss": 5.0}
@@ -120,7 +116,6 @@ def test_multiple_sensitive_data_types_dont_stack_the_bonus():
 # ---------------------------------------------------------------------------
 # Compliance scope bonus
 # ---------------------------------------------------------------------------
-
 def test_compliance_scope_adds_bonus():
     vuln = {"cvss": 4.0}
     with_scope = compute_business_priority_score(vuln, _ctx(complianceScope=["pci"]))
@@ -137,7 +132,6 @@ def test_compliance_scope_of_none_only_does_not_add_bonus():
 # ---------------------------------------------------------------------------
 # Air-gapped halves the exposure bonus (not the tier multiplier)
 # ---------------------------------------------------------------------------
-
 def test_air_gapped_halves_exposure_bonus_but_keeps_tier_multiplier():
     vuln = {"cvss": 8.0}
     ctx = _ctx(criticalityTier=1, internetFacing="public", airGapped=True)
@@ -156,7 +150,6 @@ def test_air_gapped_scores_lower_than_equivalent_non_air_gapped():
 # ---------------------------------------------------------------------------
 # Full combined scenario, worked out by hand
 # ---------------------------------------------------------------------------
-
 def test_full_combined_scenario_matches_hand_calculation():
     vuln = {"cvss": 9.0}
     ctx = _ctx(

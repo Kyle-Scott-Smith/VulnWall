@@ -72,6 +72,11 @@ mfa_bp = Blueprint("mfa", __name__, url_prefix="/api/auth/mfa")
 CODE_LENGTH = 6
 CODE_TTL_MINUTES = 10
 MAX_ATTEMPTS = 5
+# Each resend issues a fresh code and resets the attempt counter, so without
+# a cap, resend + 5 guesses could repeat forever. Counted per pending
+# sign-in (stored in the session, which login()/Google's callback clear
+# when a new sign-in starts).
+MAX_RESENDS = 3
 
 
 def _generate_code():
@@ -192,6 +197,7 @@ def verify():
 
     _clear_code(row["id"])
     session.pop("mfa_pending_user_id", None)
+    session.pop("mfa_resend_count", None)
     session["user_id"] = row["id"]
 
     return jsonify({"status": "signed_in", **auth._user_to_json(row)})
@@ -205,9 +211,17 @@ def resend():
     if not row:
         return jsonify({"error": "No sign-in is waiting for a code. Please sign in again."}), 400
 
+    resends = session.get("mfa_resend_count", 0)
+    if resends >= MAX_RESENDS:
+        _clear_code(row["id"])
+        session.pop("mfa_pending_user_id", None)
+        session.pop("mfa_resend_count", None)
+        return jsonify({"error": "Too many codes requested. Please sign in again."}), 429
+
     try:
         start_mfa_challenge(row)
     except EnvironmentError as e:
         return jsonify({"error": str(e)}), 503
 
+    session["mfa_resend_count"] = resends + 1
     return jsonify({"status": "code_resent"})

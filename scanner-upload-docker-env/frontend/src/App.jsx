@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from "react";
 import Tutorial, { hasCompletedTutorial } from "./Tutorial";
 import { Term } from "./Glossary";
 import { evidenceLinks, formatSyncedAt } from "./evidence";
+import { priorityCode, defaultTicketDraft, draftToSavedTicket, restoreDrafts } from "./ticketDrafts";
+import { hasConfidence, formatConfidence, isLowConfidence } from "./confidence";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from "recharts";
 
 // Base URL for the scanner-upload backend (Flask). Update this if the
@@ -19,27 +21,27 @@ const HEADER_TERMS = { CVE: "cve", CVSS: "cvss", Severity: "severity", Asset: "a
 // contents with the parsed findings from the scanner-upload backend.
 export let cveDetails = {
   "CVE-2024-3094": {
-    cvss: 9.8, confidence: 92, severity: "Critical",
+    cvss: 9.8, confidence: null, severity: "Critical",
     title: "XZ Utils backdoor (liblzma)",
     why: "A malicious backdoor was introduced into upstream liblzma allowing remote code execution via SSH on affected distributions. Exposed servers can be fully compromised.",
     fixes: ["Downgrade xz-utils to version 5.4.6 or earlier", "Restart sshd on affected hosts", "Audit authorized_keys for unknown entries"] },
   "CVE-2026-33845": {
-    cvss: 9.6, confidence: 88, severity: "Critical",
+    cvss: 9.6, confidence: null, severity: "Critical",
     title: "OpenSSL heap overflow in X.509 parser",
     why: "OpenSSL heap overflow in X.509 parser allows remote code execution via crafted certificate chains sent during TLS handshake.",
     fixes: ["Update OpenSSL to 3.3.1 or later", "Restart all services using OpenSSL", "Rotate TLS certificates on affected hosts"] },
   "CVE-2026-44012": {
-    cvss: 9.1, confidence: 95, severity: "Critical",
+    cvss: 9.1, confidence: null, severity: "Critical",
     title: "Redis Lua sandbox escape",
     why: "Redis Lua sandbox escape allows authenticated users to run arbitrary OS commands via crafted Lua scripts, bypassing access controls.",
     fixes: ["Upgrade Redis to 7.2.5 or later", "Disable Lua scripting if not required", "Restrict Redis network access to trusted IPs"] },
   "CVE-2026-33846": {
-    cvss: 8.2, confidence: 81, severity: "High",
+    cvss: 8.2, confidence: null, severity: "High",
     title: "Kubernetes kubelet path traversal",
     why: "A path traversal vulnerability in the Kubernetes kubelet API allows attackers with network access to read arbitrary files from the host filesystem, potentially exposing secrets and credentials.",
     fixes: ["Upgrade Kubernetes to 1.29.4 or later", "Restrict kubelet API access via network policy", "Rotate all secrets stored on affected nodes"] },
   "CVE-2026-12012": {
-    cvss: 6.3, confidence: 77, severity: "Medium",
+    cvss: 6.3, confidence: null, severity: "Medium",
     title: "nginx HTTP/3 use-after-free",
     why: "A use-after-free bug in nginx's HTTP/3 QUIC implementation can be triggered by a malformed QUIC packet, potentially leading to denial of service or limited memory disclosure.",
     fixes: ["Upgrade nginx to 1.27.3 or later", "Disable HTTP/3 support if not required", "Apply vendor patch NGINX-2026-001"] } 
@@ -55,11 +57,11 @@ export let vulnRows = [
   { id: "CVE-2026-12012", title: "nginx HTTP/3 use-after-free",        severity: "Medium",   cvss: 6.3, asset: "edge-gw-prod-02" },
 ];
 export let validationRows = [
-  { id: "CVE-2024-3094",  severity: "Critical", status: "Validated",    desc: "OpenSSL heap overflow in X.509 parser"  },
-  { id: "CVE-2026-33845", severity: "Critical", status: "Needs Review", desc: "Kubernetes kubelet path traversal"      },
-  { id: "CVE-2026-44012", severity: "Critical", status: "Validated",    desc: "Redis Lua sandbox escape"               },
-  { id: "CVE-2026-33846", severity: "High",     status: "Validated",    desc: "Kubernetes kubelet path traversal"      },
-  { id: "CVE-2026-12012", severity: "Medium",   status: "Needs Review", desc: "nginx HTTP/3 use-after-free"            },
+  { id: "CVE-2024-3094",  severity: "Critical", status: "No flags",     reasons: [], desc: "OpenSSL heap overflow in X.509 parser"  },
+  { id: "CVE-2026-33845", severity: "Critical", status: "Needs Review", reasons: ["Sample data: the scanner gave no description."], desc: "Kubernetes kubelet path traversal"      },
+  { id: "CVE-2026-44012", severity: "Critical", status: "No flags",     reasons: [], desc: "Redis Lua sandbox escape"               },
+  { id: "CVE-2026-33846", severity: "High",     status: "No flags",     reasons: [], desc: "Kubernetes kubelet path traversal"      },
+  { id: "CVE-2026-12012", severity: "Medium",   status: "Needs Review", reasons: ["Sample data: the scanner gave no description."], desc: "nginx HTTP/3 use-after-free"            },
 ];
 // Raw normalized findings from the last successful scan, kept around so the
 // chatbot can ground its answers in the same data the rest of the wizard is
@@ -110,7 +112,7 @@ export function applyScanResults(vulnerabilities, meta) {
       why = v.why || "No explanation was returned for this finding.";
       businessImpact = v.business_impact || "";
       fixes = Array.isArray(v.fixes) && v.fixes.length ? v.fixes : ["Review the vendor advisory and apply the recommended patch."];
-      confidence = typeof v.confidence === "number" ? v.confidence : 50;
+      confidence = hasConfidence(v.confidence) ? v.confidence : null; // never invent one
     } else {
       // Analysis hasn't run yet (or failed to reach the backend) — same
       // stand-in heuristics as before so the step still renders something.
@@ -124,7 +126,7 @@ export function applyScanResults(vulnerabilities, meta) {
       fixes.push("Re-scan the asset after remediation to confirm the fix");
       why = v.description || "No description was provided by the scanner for this finding.";
       businessImpact = "";
-      confidence = typeof v.cvss === "number" && v.description ? 95 : 65;
+      confidence = null; // no AI result, so there is no confidence to show
     }
 
     return [id, {
@@ -158,17 +160,37 @@ export function applyScanResults(vulnerabilities, meta) {
   // flag that too instead of treating it as automatically validated.
   validationRows = list.map(v => {
     const id = v.cve || v.title;
-    const hasAiResult = v.ai_generated !== undefined;
-    const complete = hasAiResult
-      ? v.ai_generated && (typeof v.confidence !== "number" || v.confidence >= 60)
-      : typeof v.cvss === "number" && !!v.description;
+    const reasons = validationReasons(v);
     return {
       id,
       severity: v.severity || "Unknown",
-      status: complete ? "Validated" : "Needs Review",
+      status: reasons.length === 0 ? "No flags" : "Needs Review",
+      // Plain-language reasons shown on the Validation step, so a flag is
+      // explained rather than just asserted.
+      reasons,
       desc: v.title || v.description || "",
     };
   });
+}
+
+// Why a finding needs a human look — empty means "nothing flagged". These
+// are checks on the DATA we hold (did the scanner give a score and a
+// description, did AI analysis run, how confident did it say it was). They do
+// NOT verify the AI's text against NVD, MITRE or vendor advisories.
+export function validationReasons(v) {
+  const reasons = [];
+  if (v.ai_generated !== undefined) {
+    if (!v.ai_generated) {
+      reasons.push("AI analysis didn't run for this finding, so the explanation is a generic template.");
+    }
+    if (isLowConfidence(v.confidence)) {
+      reasons.push(`The AI reported low confidence in its own answer (${v.confidence}%).`);
+    }
+  } else {
+    if (typeof v.cvss !== "number") reasons.push("The scanner gave no CVSS score.");
+    if (!v.description) reasons.push("The scanner gave no description.");
+  }
+  return reasons;
 }
 
 // Set by runAiAnalysis() from the last /api/analyze response so the UI can
@@ -291,7 +313,7 @@ const css = `
   .uploaded-file { display:flex; align-items:center; gap:10px; padding:12px 16px; background:#f9fafb; border-radius:10px; border:1px solid #e5e7eb; }
   .uploaded-name { font-size:13px; font-weight:500; color:#374151; }
   .uploaded-size { font-size:12px; color:#9ca3af; }
-  .spinner { width:12px; height:12px; border-radius:50%; border:2px solid rgba(124,58,237,.25); border-top-color:#7c3aed; display:inline-block; animation:spin .7s linear infinite; flex-shrink:0; }
+  .spinner { width:12px; height:12px; border-radius:50%; border:2px solid rgba(37,99,235,.25); border-top-color:#2563eb; display:inline-block; animation:spin .7s linear infinite; flex-shrink:0; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ai analysis */
@@ -307,13 +329,13 @@ const css = `
   .risk-row:hover { color:#2563eb; }
   td.cve-link { color:#2563eb; font-size:13px; cursor:pointer; }
   td.cve-link:hover { text-decoration:underline; color:#1d4ed8; }
-  .ai-insight-box { background:#f5f3ff; border-radius:12px; padding:20px; }
+  .ai-insight-box { background:#eff6ff; border-radius:12px; padding:20px; }
   .ai-insight-header { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
-  .ai-insight-title { font-size:14px; font-weight:700; color:#7c3aed; }
-  .ai-insight-analyzing { font-size:13px; color:#7c3aed; margin-bottom:16px; font-style:italic; }
+  .ai-insight-title { font-size:14px; font-weight:700; color:#2563eb; }
+  .ai-insight-analyzing { font-size:13px; color:#2563eb; margin-bottom:16px; font-style:italic; }
   .ai-insight-chips { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
   .ai-chip { }
-  .ai-chip-val { font-size:14px; font-weight:700; color:#7c3aed; }
+  .ai-chip-val { font-size:14px; font-weight:700; color:#2563eb; }
   .ai-chip-desc { font-size:12px; color:#9ca3af; }
 
   /* cve detail */
@@ -329,7 +351,7 @@ const css = `
   .cve-tab { padding:9px 16px; font-size:13px; font-weight:600; color:#9ca3af; cursor:pointer; background:none; border:none; border-bottom:2px solid transparent; font-family:'DM Sans', sans-serif; margin-bottom:-1px; }
   .cve-tab:hover { color:#374151; }
   .cve-tab.active { color:#111; border-bottom-color:#2563eb; }
-  .cve-tab.active.impact-tab { color:#7c3aed; border-bottom-color:#7c3aed; }
+  .cve-tab.active.impact-tab { color:#2563eb; border-bottom-color:#2563eb; }
   .read-more-toggle { display:inline-block; margin-top:10px; font-size:12px; font-weight:700; color:#2563eb; cursor:pointer; user-select:none; }
   .cve-fix-list { list-style:none; display:flex; flex-direction:column; gap:6px; }
   .cve-fix-item { font-size:13px; color:#6b7280; display:flex; gap:8px; }
@@ -360,12 +382,10 @@ const css = `
   .val-row-top { display:flex; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap; }
   .val-cve { font-size:13px; font-weight:700; color:#111; }
   .val-status { display:flex; align-items:center; gap:4px; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
-  .val-validated { background:#dcfce7; color:#16a34a; }
+  .val-noflags { background:#f3f4f6; color:#6b7280; }
   .val-review { background:#fef9c3; color:#ca8a04; }
   .val-sub { font-size:12px; color:#9ca3af; margin-bottom:12px; }
-  .val-checks { display:flex; gap:20px; flex-wrap:wrap; }
-  .val-check { display:flex; align-items:center; gap:6px; font-size:12px; color:#374151; }
-  .check-icon { color:#22c55e; font-size:14px; }
+  .val-reasons { margin:0; padding-left:18px; font-size:12px; color:#92400e; line-height:1.6; }
 
   /* dashboard */
   .heading { margin-bottom:16px; padding:0 4px; flex-shrink:0; }
@@ -393,7 +413,7 @@ const css = `
   .activity-label { font-size:clamp(12px,1.3vw,13px); font-weight:500; color:#374151; line-height:1.4; }
 
   /* chat bubble */
-  .chat-bubble { position:fixed; bottom:28px; right:28px; width:44px; height:44px; border-radius:50%; background:#7c3aed; display:flex; align-items:center; justify-content:center; color:white; cursor:pointer; box-shadow:0 4px 16px rgba(124,58,237,.45); font-size:20px; z-index:100; }
+  .chat-bubble { position:fixed; bottom:28px; right:28px; width:44px; height:44px; border-radius:50%; background:#2563eb; display:flex; align-items:center; justify-content:center; color:white; cursor:pointer; box-shadow:0 4px 16px rgba(37,99,235,.45); font-size:20px; z-index:100; }
 
   @media (max-width:700px) {
     body { padding:12px; }
@@ -478,7 +498,7 @@ function Stepper({ currentStep }) {
 const NAV_TAB_LABELS = { dashboard: "Dashboard", "upload-scan": "Upload Scan", history: "Scan History", tickets: "Tickets", users: "Users" };
 const ROLE_LABELS = { admin: "Admin", analyst: "Security Analyst", viewer: "Viewer" };
 
-function navTabsForRole(role) {
+export function navTabsForRole(role) {
   const tabs = ["dashboard", "upload-scan", "history", "tickets"];
   if (role === "viewer") return tabs.filter(t => t !== "upload-scan");
   if (role === "admin") return [...tabs, "users"];
@@ -528,7 +548,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // Password rule: 8+ chars, at least one lowercase, one uppercase, one
 // number, and one symbol. Stated in the UI hint so it's obvious upfront
 // rather than only surfacing after a rejected signup.
-function passwordError(password) {
+export function passwordError(password) {
   if (password.length < 8) return "Password must be at least 8 characters";
   if (!/[a-z]/.test(password)) return "Password must include a lowercase letter";
   if (!/[A-Z]/.test(password)) return "Password must include an uppercase letter";
@@ -974,7 +994,7 @@ const qFieldStyle = { width: "100%", padding: "10px 14px", borderRadius: 8, bord
 
 // Looks up the human-readable label for a stored value in one of the
 // *_OPTIONS arrays above — used by the read-only summary in Profile.
-function optionLabel(options, value) {
+export function optionLabel(options, value) {
   return options.find(o => o.value === value)?.label || value;
 }
 
@@ -998,7 +1018,7 @@ function RadioOption({ checked, label, onChange }) {
 
 // Toggling a "none"-style option in a multi-select clears every other
 // option (and vice versa) — same rule the backend enforces.
-function toggleMulti(list, value, exclusiveValue = "none") {
+export function toggleMulti(list, value, exclusiveValue = "none") {
   if (value === exclusiveValue) return list.includes(value) ? [] : [exclusiveValue];
   const withoutExclusive = list.filter(v => v !== exclusiveValue);
   return withoutExclusive.includes(value) ? withoutExclusive.filter(v => v !== value) : [...withoutExclusive, value];
@@ -1459,7 +1479,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
                   <div className="dropzone-sub">Parsing scan file and checking CVEs against Tenable.io…</div>
                 )}
                 {status === "success" && analyzing && (
-                  <div className="dropzone-sub" style={{ color: "#7c3aed", display: "flex", alignItems: "center", gap: 8 }}>
+                  <div className="dropzone-sub" style={{ color: "#2563eb", display: "flex", alignItems: "center", gap: 8 }}>
                     <span className="spinner" aria-hidden="true" />
                     Running AI analysis and weighting results by your business context…
                   </div>
@@ -1580,7 +1600,7 @@ function UploadStep({ onNext, onBack, file, setFile, onParsed }) {
               <div className="dropzone-sub">Running {scannerName} against {target}… this can take a while for larger targets.</div>
             )}
             {liveStatus === "success" && liveAnalyzing && (
-              <div className="dropzone-sub" style={{ color: "#7c3aed", display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="dropzone-sub" style={{ color: "#2563eb", display: "flex", alignItems: "center", gap: 8 }}>
                 <span className="spinner" aria-hidden="true" />
                 Running AI analysis and weighting results by your business context…
               </div>
@@ -1715,7 +1735,7 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
         })()}
 
         {!lastBusinessContextApplied && (
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, fontSize: 12, color: "#7c3aed", background: "#f5f3ff", borderRadius: 10, padding: "10px 14px", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, fontSize: 12, color: "#2563eb", background: "#eff6ff", borderRadius: 10, padding: "10px 14px", marginBottom: 16 }}>
             <span>These results are ranked by CVSS only. Complete your business profile so we can rank them by business impact instead.</span>
           </div>
         )}
@@ -1768,7 +1788,7 @@ function AISummaryStep({ onNext, onBack, onCveClick }) {
 
         <div className="ai-insight-box">
           <div className="ai-insight-header">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#2563eb" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>
             </svg>
             <div className="ai-insight-title">AI-Powered Analysis</div>
@@ -1838,7 +1858,7 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
   const cvssColor = d.cvss >= 9 ? "#dc2626" : d.cvss >= 7 ? "#f97316" : "#ca8a04";
   // Deliberately neutral: a green 95% read as a stamp of approval to testers
   // and lowered trust. Only flag the low end, where a human should look.
-  const confColor = d.confidence < 60 ? "#f97316" : "#374151";
+  const confColor = isLowConfidence(d.confidence) ? "#f97316" : "#374151";
   const evidence = evidenceLinks(cveId, d.references);
 
   const tabs = [
@@ -1871,8 +1891,8 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
           </div>
           <div className="cve-score-card">
             <div className="cve-score-label"><Term k="aiConfidence">AI Confidence</Term></div>
-            <div className="cve-score-val" style={{ color: confColor }}>{d.confidence}%</div>
-            <div className="cve-score-sub">AI estimate, not a verified figure</div>
+            <div className="cve-score-val" style={{ color: confColor, ...(hasConfidence(d.confidence) ? {} : { fontSize: 18, lineHeight: "42px" }) }}>{formatConfidence(d.confidence)}</div>
+            <div className="cve-score-sub">{hasConfidence(d.confidence) ? "AI estimate, not a verified figure" : "The AI didn't give a confidence for this finding"}</div>
           </div>
           {d.businessPriorityScore != null && (() => {
             const band = criticalityBand(d.businessPriorityScore, d.cvss);
@@ -1916,7 +1936,7 @@ function CveDetailStep({ cveId, onBack, onNext, backLabel }) {
           ))}
         </div>
 
-        <div className="cve-section" style={tab.key === "impact" ? { background: "#f5f3ff", borderLeft: "3px solid #7c3aed" } : undefined}>
+        <div className="cve-section" style={tab.key === "impact" ? { background: "#eff6ff", borderLeft: "3px solid #2563eb" } : undefined}>
           {tab.key === "fix" ? (() => {
             const fixes = tab.fixes || [];
             const expandedFix = isExpanded("fix");
@@ -2023,7 +2043,7 @@ function FilterBar({ search, onSearchChange, searchPlaceholder = "Search…", gr
 
 // Matches a row against a free-text search term across whichever fields are
 // present on that row shape (cve/id, title, asset, description).
-function matchesSearch(row, term) {
+export function matchesSearch(row, term) {
   if (!term.trim()) return true;
   const t = term.trim().toLowerCase();
   return [row.id, row.title, row.desc, row.asset]
@@ -2040,7 +2060,7 @@ const PRIORITY_RANK = { "P1 - Critical": 3, "P1": 3, "P2 - High": 2, "P2": 2, "P
 // Generic sort helper shared by Select/Validation/GenerateTicket/Review.
 // `field` is the row key to sort by ("id" | "severity" | "cvss" | ...),
 // `dir` is "asc" | "desc". Pass field === "None" (or falsy) to skip sorting.
-function sortRows(rows, field, dir = "asc") {
+export function sortRows(rows, field, dir = "asc") {
   if (!field || field === "None") return rows;
   const rank = row => {
     let v = row[field];
@@ -2163,12 +2183,12 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
   // All currently-selected CVEs still flagged "Needs Review" — this is what
   // both the bulk button and the count above it operate on, independent of
   // whatever the search/severity/status filters are currently narrowed to.
-  const nonValidatedIds = validationRows
+  const flaggedIds = validationRows
     .filter(r => selected.includes(r.id) && r.status === "Needs Review")
     .map(r => r.id);
 
   const removeCve = id => setSelected(prev => prev.filter(x => x !== id));
-  const removeAllNonValidated = () => setSelected(prev => prev.filter(x => !nonValidatedIds.includes(x)));
+  const removeAllFlagged = () => setSelected(prev => prev.filter(x => !flaggedIds.includes(x)));
 
   return (
     <>
@@ -2176,19 +2196,21 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
         <div className="val-header">
           <div>
             <div className="page-title">Validation</div>
-            <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 4 }}>Anti-hallucination</div>
-            <div className="val-desc" style={{ marginBottom: 0 }}>For each selected vulnerability we cross-check the AI summary, remediation, severity classification, and flag any potential hallucinations against NVD, MITRE, and vendor advisories.</div>
+            <div className="val-desc" style={{ marginBottom: 0 }}>
+              These automatic checks only look at the data we have: whether the scanner gave a CVSS score and description, whether the AI analysis ran, and how confident the AI said it was.
+              <strong> They don't verify the AI's explanation against NVD, MITRE or vendor advisories</strong> — open the reference links on a finding's detail page to confirm it yourself.
+            </div>
           </div>
           <div style={{ textAlign: "right" }}>
-            <div className="val-issues-label">Issues Found</div>
+            <div className="val-issues-label">Flagged for review</div>
             <div className="val-issues-count">
-              {nonValidatedIds.length}
+              {flaggedIds.length}
             </div>
             <button
-              onClick={removeAllNonValidated}
-              disabled={nonValidatedIds.length === 0}
-              style={{ marginTop: 6, padding: "6px 12px", borderRadius: 20, border: "1px solid #fecaca", background: nonValidatedIds.length === 0 ? "#f9fafb" : "#fef2f2", color: nonValidatedIds.length === 0 ? "#9ca3af" : "#dc2626", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: nonValidatedIds.length === 0 ? "default" : "pointer" }}>
-              Remove All Non-Validated
+              onClick={removeAllFlagged}
+              disabled={flaggedIds.length === 0}
+              style={{ marginTop: 6, padding: "6px 12px", borderRadius: 20, border: "1px solid #fecaca", background: flaggedIds.length === 0 ? "#f9fafb" : "#fef2f2", color: flaggedIds.length === 0 ? "#9ca3af" : "#dc2626", fontSize: 12, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: flaggedIds.length === 0 ? "default" : "pointer" }}>
+              Remove all flagged
             </button>
           </div>
         </div>
@@ -2199,7 +2221,7 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
           searchPlaceholder="Search CVE or description…"
           groups={[
             { options: ["All", "Critical", "High", "Medium", "Low"], value: severityFilter, onChange: setSeverityFilter },
-            { options: ["All", "Validated", "Needs Review"], value: statusFilter, onChange: setStatusFilter },
+            { options: ["All", "No flags", "Needs Review"], value: statusFilter, onChange: setStatusFilter },
           ]}
           sort={{ options: Object.keys(VALIDATION_SORT_FIELDS), value: sortBy, onChange: setSortBy, dir: sortDir, onToggleDir: () => setSortDir(d => d === "asc" ? "desc" : "asc") }}
           resultCount={filteredRows.length}
@@ -2217,11 +2239,8 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
             <div className="val-row-top">
               <span className="val-cve" style={{ cursor: "pointer" }} onClick={() => onCveClick(row.id)}>{row.id}</span>
               <span className={`severity-pill sev-${row.severity.toLowerCase()}`}>{row.severity}</span>
-              <span className={`val-status ${row.status === "Validated" ? "val-validated" : "val-review"}`}>
-                {row.status === "Validated"
-                  ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  : <span style={{ fontSize: 14 }}>✋</span>}
-                <Term k={row.status === "Validated" ? "validated" : "needsReview"}>{row.status}</Term>
+              <span className={`val-status ${row.status === "No flags" ? "val-noflags" : "val-review"}`}>
+                <Term k={row.status === "No flags" ? "noFlags" : "needsReview"}>{row.status}</Term>
               </span>
               {row.status === "Needs Review" && (
                 <button
@@ -2233,14 +2252,11 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
               )}
             </div>
             <div className="val-sub">{row.desc}</div>
-            <div className="val-checks">
-              {["Summary", "Remediation", "Severity", "No hallucination"].map(c => (
-                <div key={c} className="val-check">
-                  <svg className="check-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  {c}
-                </div>
-              ))}
-            </div>
+            {row.reasons && row.reasons.length > 0 && (
+              <ul className="val-reasons">
+                {row.reasons.map(r => <li key={r}>{r}</li>)}
+              </ul>
+            )}
           </div>
         ))}
       </div>
@@ -2252,24 +2268,17 @@ function ValidationStep({ onNext, onBack, selected, setSelected, onCveClick }) {
 //Upload step 5: Generate Ticket
 const TICKET_SORT_FIELDS = { "None": null, "CVE": "id", "Title": "title", "Severity": "severity", "Priority": "priority", "Asset": "asset" };
 
-function GenerateTicketStep({ onNext, onBack, selected }) {
-  const tickets = (selected || []).map(id => {
-    const d = cveDetails[id] || {};
-    const row = vulnRows.find(r => r.id === id) || {};
-    return {
-      id,
-      title: `[${row.severity || ""}] ${id} — ${d.title || ""}`,
-      description: d.why || "",
-      severity: row.severity || "",
-      priority: row.severity === "Critical" ? "P1 - Critical" : row.severity === "High" ? "P2 - High" : "P3 - Medium",
-      asset: row.asset || "",
-      assignTo: row.severity === "Critical" ? "Security Team" : "IT Operations",
-    };
-  });
+function GenerateTicketStep({ onNext, onBack, selected, savedWork, onWorkChange, defaultAssign }) {
+  // New drafts start assigned to the "Default assign to" choice from Profile.
+  const buildDraft = id => defaultTicketDraft(id, vulnRows.find(r => r.id === id) || {}, cveDetails[id] || {}, { assignee: defaultAssign });
+  // Edits and approve/reject decisions are kept by the parent (savedWork), so
+  // going Back from Review & Send and returning here doesn't wipe them.
+  const [initial] = useState(() => restoreDrafts(savedWork, selected, buildDraft));
 
   const [activeIdx, setActiveIdx] = useState(0);
-  const [forms, setForms] = useState(tickets.map(t => ({ ...t })));
-  const [submitted, setSubmitted] = useState(tickets.map(() => null));
+  const [forms, setForms] = useState(initial.forms);
+  const [submitted, setSubmitted] = useState(initial.submitted);
+  useEffect(() => { onWorkChange?.({ forms, submitted }); }, [forms, submitted]);
   const allDone = submitted.every(s => s !== null);
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState("All");
@@ -2439,7 +2448,7 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
             <button
               onClick={() => {
                 setSubmitted(prev => prev.map((s, i) => i === activeIdx ? (s === "approved" ? null : "approved") : s));
-                if (submitted[activeIdx] !== "approved" && activeIdx < tickets.length - 1) setActiveIdx(activeIdx + 1);
+                if (submitted[activeIdx] !== "approved" && activeIdx < forms.length - 1) setActiveIdx(activeIdx + 1);
               }}
               style={{ padding: "12px", borderRadius: 20, border: "none", background: submitted[activeIdx] === "approved" ? "#16a34a" : "#2563eb", color: "#fff", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
               {submitted[activeIdx] === "approved" ? "✓ Approved" : "Approve"}
@@ -2447,7 +2456,7 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
             <button
               onClick={() => {
                 setSubmitted(prev => prev.map((s, i) => i === activeIdx ? (s === "rejected" ? null : "rejected") : s));
-                if (submitted[activeIdx] !== "rejected" && activeIdx < tickets.length - 1) setActiveIdx(activeIdx + 1);
+                if (submitted[activeIdx] !== "rejected" && activeIdx < forms.length - 1) setActiveIdx(activeIdx + 1);
               }}
               style={{ padding: "12px", borderRadius: 20, border: "1px solid #e5e7eb", background: submitted[activeIdx] === "rejected" ? "#fef2f2" : "#fff", color: submitted[activeIdx] === "rejected" ? "#dc2626" : "#374151", fontSize: 14, fontWeight: 600, fontFamily: "DM Sans, sans-serif", cursor: "pointer" }}>
               {submitted[activeIdx] === "rejected" ? "✗ Rejected" : "Reject"}
@@ -2456,7 +2465,7 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
         </div>
         </div>
       </div>
-      <Footer step={4} onBack={onBack} onNext={() => onNext(tickets.filter((_, i) => submitted[i] === "approved").map(t => t.id))} nextLabel="Review & Send" disableNext={!allDone} />
+      <Footer step={4} onBack={onBack} onNext={() => onNext(forms.filter((_, i) => submitted[i] === "approved"))} nextLabel="Review & Send" disableNext={!allDone} />
     </>
   );
 }
@@ -2465,17 +2474,10 @@ function GenerateTicketStep({ onNext, onBack, selected }) {
 const REVIEW_SORT_FIELDS = { "None": null, "CVE": "id", "Title": "title", "Severity": "severity", "Priority": "priority", "Assign To": "assignTo" };
 
 function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit }) {
-  const tickets = (approvedTickets || []).map(id => {
-    const d = cveDetails[id] || {};
-    const row = vulnRows.find(r => r.id === id) || {};
-    return {
-      id,
-      title: d.title || "",
-      priority: row.severity === "Critical" ? "P1" : row.severity === "High" ? "P2" : "P3",
-      assignTo: row.severity === "Critical" ? "Security Team" : "IT Operations",
-      severity: row.severity || "",
-    };
-  });
+  // `approvedTickets` are the drafts exactly as edited in the Generate Ticket
+  // step (title, description, priority, assignee). Nothing is rebuilt from the
+  // finding here any more — that used to silently discard those edits.
+  const tickets = (approvedTickets || []).map(draft => ({ ...draft, priority: priorityCode(draft.priority) }));
 
   const [sent, setSent] = useState(false);
   const [sending, setSending] = useState(false);
@@ -2602,7 +2604,7 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
                         method: "POST",
                         credentials: "include",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ title: t.title, description: cveDetails[t.id]?.why || "", priority: t.priority }),
+                        body: JSON.stringify({ title: t.title, description: t.description || "", priority: t.priority }),
                       });
                       if (res.ok) {
                         const created = await res.json();
@@ -2622,36 +2624,34 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
                   setSendError("Couldn't reach the Jira integration, so nothing was sent to Jira. These tickets were saved in this app only.");
                 }
 
-                const newTickets = tickets.map((t, i) => ({
-                  id: `T-${String(106 + i).padStart(3, "0")}`,
-                  cve: t.id,
-                  title: t.title,
-                  priority: t.priority,
-                  status: "Open",
-                  assigned: t.assignTo,
-                  date: new Date().toLocaleDateString("en-GB").replace(/\//g, "-"),
-                  cvss: cveDetails[t.id]?.cvss || 0,
-                  confidence: cveDetails[t.id]?.confidence || 0,
-                  fixes: cveDetails[t.id]?.fixes || [],
-                  why: cveDetails[t.id]?.why || "",
-                  jiraIssueKey: jiraResults[t.id]?.issueKey || null,
-                  jiraUrl: jiraResults[t.id]?.url || null,
-                }));
+                // No ids are sent: the backend numbers new tickets (see
+                // tickets.py), so a second batch can't overwrite the first.
+                const date = new Date().toLocaleDateString("en-GB").replace(/\//g, "-");
+                const toSave = tickets.map(t =>
+                  draftToSavedTicket(t, cveDetails[t.id] || {}, { date, jira: jiraResults[t.id] })
+                );
 
                 // Persist to the signed-in account (see tickets.py) so
-                // these survive a refresh/restart instead of only living
-                // in this tab's React state. Best-effort — a save failure
-                // here shouldn't block the wizard, same reasoning as the
-                // Jira push above.
+                // these survive a refresh/restart. The response carries the
+                // ids the server assigned.
+                let newTickets;
+                let allTickets = null;
                 try {
-                  await fetch(`${API_BASE}/api/tickets`, {
+                  const saveRes = await fetch(`${API_BASE}/api/tickets`, {
                     method: "POST",
                     credentials: "include",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(newTickets),
+                    body: JSON.stringify(toSave),
                   });
+                  if (!saveRes.ok) throw new Error(`save failed (${saveRes.status})`);
+                  const saved = await saveRes.json();
+                  newTickets = saved.created;
+                  allTickets = saved.tickets;
                 } catch {
-                  // local ticket list below still gets these either way
+                  // Not saved on the server, so the tickets would vanish on
+                  // refresh. Say so, and show them for this session only.
+                  setSendError(prev => [prev, "These tickets could not be saved to your account, so they will disappear when you refresh the page."].filter(Boolean).join(" "));
+                  newTickets = toSave.map((t, i) => ({ ...t, id: `unsaved-${Date.now()}-${i}`, jiraLinked: !!t.jiraIssueKey }));
                 }
 
                 // Only NOW does this scan count as "completed" — see
@@ -2687,7 +2687,7 @@ function ReviewSendStep({ onNext, onBack, selected, approvedTickets, onSubmit })
                   // scan just won't show in history this time; nothing else depends on it
                 }
 
-                onSubmit(newTickets);
+                onSubmit(newTickets, allTickets);
                 setJiraSentCount(Object.keys(jiraResults).length);
                 setSending(false);
                 setSent(true);
@@ -2950,8 +2950,8 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
           )}
 
           {/* AI Analysis */}
-          <div style={{ background: "#f5f3ff", borderRadius: 10, padding: 12, marginBottom: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#7c3aed", marginBottom: 6 }}>AI-Powered Analysis</div>
+          <div style={{ background: "#eff6ff", borderRadius: 10, padding: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#2563eb", marginBottom: 6 }}>AI-Powered Analysis</div>
             <div style={{ fontSize: 12, color: "#6b7280", lineHeight: 1.5 }}>{selectedTicket.why}</div>
           </div>
 
@@ -2986,11 +2986,13 @@ function TicketList({ tickets: initialTickets, canEdit = true }) {
           <div style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}><Term k="aiConfidence">AI confidence</Term> (estimate)</div>
-              <div style={{ fontSize: 12, color: "#374151" }}>{selectedTicket.confidence}%</div>
+              <div style={{ fontSize: 12, color: "#374151" }}>{formatConfidence(selectedTicket.confidence)}</div>
             </div>
-            <div style={{ height: 6, background: "#e5e7eb", borderRadius: 99 }}>
-              <div style={{ height: 6, background: "#2563eb", borderRadius: 99, width: `${selectedTicket.confidence}%` }} />
-            </div>
+            {hasConfidence(selectedTicket.confidence) && (
+              <div style={{ height: 6, background: "#e5e7eb", borderRadius: 99 }}>
+                <div style={{ height: 6, background: "#2563eb", borderRadius: 99, width: `${selectedTicket.confidence}%` }} />
+              </div>
+            )}
           </div>
 
           {/* Buttons */}
@@ -3643,7 +3645,7 @@ function Profile({ onSignOut, userName, userEmail, role, organisation, authProvi
 // /api/dashboard/summary instead of a hardcoded list.
 const ACTIVITY_STYLES = {
   Scan:     { color: "#2563eb", bg: "#eff6ff" },
-  Ticket:   { color: "#7c3aed", bg: "#f5f3ff" },
+  Ticket:   { color: "#0d9488", bg: "#f0fdfa" },
   Resolved: { color: "#16a34a", bg: "#f0fdf4" },
   Critical: { color: "#dc2626", bg: "#fef2f2" },
 };
@@ -3925,7 +3927,7 @@ function ScanHistory() {
   );
 }
 
-function _fmtDate(iso) {
+export function _fmtDate(iso) {
   if (!iso) return "—";
   try {
     return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
@@ -3993,7 +3995,7 @@ function ChatWidget() {
 
   return (
     <div style={{ position: "fixed", bottom: 28, right: 28, width: 340, maxWidth: "90vw", height: 440, background: "#fff", borderRadius: 16, boxShadow: "0 8px 32px rgba(0,0,0,.18)", display: "flex", flexDirection: "column", overflow: "hidden", zIndex: 100, fontFamily: "DM Sans, sans-serif" }}>
-      <div style={{ padding: "12px 16px", background: "#7c3aed", color: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{ padding: "12px 16px", background: "#2563eb", color: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ fontSize: 14, fontWeight: 700 }}>Scan Assistant</div>
         <span onClick={() => setOpen(false)} style={{ cursor: "pointer", fontSize: 18, lineHeight: 1 }}>×</span>
       </div>
@@ -4046,7 +4048,7 @@ const PROFILE_PREFS_PREFIX = "vulnwiz-profile-prefs:";
 // sign-in/sign-up handlers below), this is just what shows before that.
 const DEFAULT_PROFILE_PREFS = { notifications: false, defaultAssign: "Security Team" };
 
-function loadProfilePrefs(email) {
+export function loadProfilePrefs(email) {
   if (!email) return DEFAULT_PROFILE_PREFS;
   try {
     const raw = localStorage.getItem(PROFILE_PREFS_PREFIX + email);
@@ -4061,7 +4063,7 @@ function loadProfilePrefs(email) {
   }
 }
 
-function saveProfilePrefs(email, prefs) {
+export function saveProfilePrefs(email, prefs) {
   if (!email) return;
   try {
     localStorage.setItem(PROFILE_PREFS_PREFIX + email, JSON.stringify(prefs));
@@ -4077,6 +4079,9 @@ export default function App() {
   const [cveId, setCveId] = useState(null);
   const [selected, setSelected] = useState(vulnRows.map(r => r.id));
   const [submittedTickets, setSubmittedTickets] = useState([]);
+  // Generate Ticket work (edited drafts + approve/reject decisions), kept here
+  // so it survives stepping Back and forward again.
+  const [ticketWork, setTicketWork] = useState(null);
   const [liveTickets, setLiveTickets] = useState([]);
   const [prevStep, setPrevStep] = useState(1);
   const [uploadedFile, setUploadedFile] = useState(null);
@@ -4287,6 +4292,7 @@ export default function App() {
     setCveId(null);
     setSelected(vulnRows.map(r => r.id));
     setSubmittedTickets([]);
+    setTicketWork(null);
     setLiveTickets([]);
     setUploadedFile(null);
   };
@@ -4294,6 +4300,7 @@ export default function App() {
   const handleScanParsed = (vulnerabilities, meta) => {
     applyScanResults(vulnerabilities, meta);
     setSelected(vulnRows.map(r => r.id));
+    setTicketWork(null); // drafts from a previous scan don't apply to this one
   };
 
   const renderUploadContent = () => {
@@ -4305,8 +4312,8 @@ export default function App() {
       case 1: return <AISummaryStep onNext={() => setUploadStep(2)} onBack={() => setUploadStep(0)} onCveClick={id => { setPrevStep(1); setCveId(id); }} />;
       case 2: return <SelectStep onNext={() => setUploadStep(3)} onBack={() => setUploadStep(1)} selected={selected} setSelected={setSelected} onCveClick={id => { setPrevStep(2); setCveId(id); }} />;
       case 3: return <ValidationStep onNext={() => setUploadStep(4)} onBack={() => setUploadStep(2)} selected={selected} setSelected={setSelected} onCveClick={id => { setPrevStep(3); setCveId(id); }} />;
-      case 4: return <GenerateTicketStep onNext={(approved) => { setSubmittedTickets(approved); setUploadStep(5); }} onBack={() => setUploadStep(3)} selected={selected} />;
-      case 5: return <ReviewSendStep onNext={() => goToTab("tickets")} onBack={() => setUploadStep(4)} selected={selected} approvedTickets={submittedTickets} onSubmit={(newTickets) => setLiveTickets(prev => [...prev, ...newTickets])} />;
+      case 4: return <GenerateTicketStep onNext={(approved) => { setSubmittedTickets(approved); setUploadStep(5); }} onBack={() => setUploadStep(3)} selected={selected} savedWork={ticketWork} onWorkChange={setTicketWork} defaultAssign={defaultAssign} />;
+      case 5: return <ReviewSendStep onNext={() => goToTab("tickets")} onBack={() => setUploadStep(4)} selected={selected} approvedTickets={submittedTickets} onSubmit={(newTickets, allTickets) => { setTicketWork(null); setLiveTickets(prev => allTickets ?? [...prev, ...newTickets]); }} />;
       default: return null;
     }
   };
